@@ -52,8 +52,10 @@ Any other HF repo id can be passed to `--model` as well.
   the benchmark near-identically.
 - **Layer 0** is the token embedding. The last token is the same under both system prompts, so its probe is
   all zeros and its projections are 0.
-- **Thinking mode.** The Qwen3.5/3.8 chat template defaults to thinking mode, so formatted prompts end in
-  `<think>\n`. This is the same for probe training and benchmark scoring, so both read the same position.
+- **Thinking mode.** `format_chat` passes `enable_thinking=True`, so formatted prompts end in `<think>\n` for
+  every model, for both probe training and benchmark scoring. The flag matters: Qwen3.8's template defaults to
+  thinking mode but Qwen3.5-0.8B's does not, and appends an empty `<think>\n\n</think>\n\n` block instead.
+  Runs made before this flag was added read the 0.8B at a different token than the 27B.
 
 ## Local setup
 

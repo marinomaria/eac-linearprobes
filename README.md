@@ -86,7 +86,7 @@ Use a pod with one 80GB GPU (H100 or A100). Qwen3.8-27B's bf16 weights are about
 
 ```bash
 cd /workspace
-git clone <repo_url> eval-awareness
+git clone https://github.com/marinomaria/eac-linearprobes.git eval-awareness
 bash eval-awareness/scripts/runpod_setup.sh
 cd eval-awareness
 bash scripts/runpod_run.sh qwen3.8-27b --limit 500                  # smoke test first

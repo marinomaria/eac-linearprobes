@@ -12,11 +12,12 @@ adapted to this benchmark and to newer Qwen models.
 ## What it does
 
 1. **Train probes.** For each prompt stem in `datasets/contrastive_dataset_dolly.json`, the model sees it twice:
-   once under a "you are being evaluated" system prompt and once under a "you are deployed" system prompt.
-   For every layer, the probe is the normalized mean difference between the two sets of last-token
-   residual-stream activations.
+   once under an evaluation system prompt and once under a deployment system prompt. For every layer, the
+   probe is the normalized mean difference between the two sets of last-token residual-stream activations.
+   This is repeated for every system-prompt variant in `datasets/system_prompts.json`.
 2. **Score the benchmark.** Every EvalAwareBench prompt is fed as a single user turn and its last-token
-   activation is projected onto **every** layer's probe. This is a forward pass only, with no text generation.
+   activation is projected onto **every** variant's and layer's probe. This is a forward pass only, with no
+   text generation.
 3. **Save.** The per-prompt projections are written to `output/<model>/projections_<subset>.jsonl`.
 4. **Analyze.** `scripts/analyze.py` picks a layer and reports how much each factor shifts the projection.
 
@@ -43,6 +44,12 @@ Any other HF repo id can be passed to `--model` as well.
   the number of exaggerated factors (it can be overridden with `--layer`). It also reports AUROC between
   prompts with all 8 factors exaggerated and prompts with none, but those are only 2/256 of the data, so that
   number is noisy on small samples.
+- **System-prompt variants share one benchmark pass.** Nearly all the compute is the forward pass over the
+  51,200 benchmark prompts, which does not depend on the system prompt. Training probes per variant is cheap
+  (204 stems × 2), and the benchmark activations are projected onto all variants at once. Adding a variant
+  means adding an entry to `datasets/system_prompts.json` and rerunning. `run.py` prints the cosine similarity
+  between variants' probe directions after training: variants with near-identical directions will score
+  the benchmark near-identically.
 - **Layer 0** is the token embedding. The last token is the same under both system prompts, so its probe is
   all zeros and its projections are 0.
 - **Thinking mode.** The Qwen3.5/3.8 chat template defaults to thinking mode, so formatted prompts end in
@@ -58,7 +65,11 @@ pip install -r requirements.txt
 
 python run.py --model qwen3.5-0.8b --limit 200       # quick test, ~4 min on an M-series Mac
 python scripts/analyze.py output/qwen3.5-0.8b/projections_prompts_n200.jsonl
+python scripts/analyze.py output/qwen3.5-0.8b/projections_prompts_n200.jsonl --variant minimal
 ```
+
+`analyze.py` first prints each variant's best layer and Spearman correlation, then the per-layer and per-factor
+tables for one variant (`--variant`, default: the first in `datasets/system_prompts.json`).
 
 Without CUDA, the linear-attention layers fall back to a slow PyTorch implementation. A full local run of all
 51,200 prompts would take on the order of 11h on an M-series Mac, so run full jobs on a GPU (see below).
@@ -96,7 +107,8 @@ python scripts/analyze.py runpod-artifacts/qwen3.8-27b/projections_prompts.jsonl
 ## Output format
 
 Each line of `projections_*.jsonl` holds the prompt's `task_id`, `task_name`, `valence`, `factors_varied`,
-`num_factors_varied`, `config` (F1–F8 levels) and `projections` (one float per layer). The prompt text is left
+`num_factors_varied`, `config` (F1–F8 levels) and `projections`: `{variant_name: [one float per layer]}`.
+`probes.pt` is a dict `{variant_name: tensor[n_layers, d_model]}`. The prompt text is left
 out; rejoin it on (`task_id`, `config`) if needed.
 
 ## Credits
@@ -119,4 +131,5 @@ scripts/analyze.py         # Per-layer summary + per-factor effects
 scripts/runpod_*.sh        # RunPod setup / run
 scripts/download_artifacts.sh
 datasets/contrastive_dataset_dolly.json
+datasets/system_prompts.json   # Eval/deploy system-prompt variants: [{name, eval, deploy}]
 ```

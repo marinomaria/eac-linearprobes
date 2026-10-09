@@ -3,8 +3,10 @@
 Probe EvalAwareBench prompts for evaluation awareness.
 
 Steps:
-  1. Train one probe per layer on the contrastive dataset (or load saved probes)
-  2. Project every EvalAwareBench prompt onto every layer's probe (forward pass only)
+  1. For each system-prompt variant, train one probe per layer on the contrastive dataset
+     (or load saved probes)
+  2. Project every EvalAwareBench prompt onto every variant's and layer's probe, in a
+     single forward pass per prompt
   3. Save per-prompt projections to output/<model>/
 
 Layer selection is deferred to scripts/analyze.py: all layers come from the same
@@ -26,6 +28,7 @@ from src.model import load_model
 from src.probe import project, train_probes
 
 CONTRASTIVE_DATASET = "datasets/contrastive_dataset_dolly.json"
+SYSTEM_PROMPTS = "datasets/system_prompts.json"
 EVALAWAREBENCH = "aisa-group/EvalAwareBench"
 OUTPUT_DIR = "output"
 
@@ -34,6 +37,20 @@ def load_evalawarebench(subset):
     path = hf_hub_download(EVALAWAREBENCH, f"data/{subset}.jsonl", repo_type="dataset")
     with open(path) as f:
         return [json.loads(line) for line in f]
+
+
+def print_probe_similarity(probes):
+    """Cosine similarity between variants' probe directions, summarized over layers.
+
+    Variants with near-identical directions will score the benchmark near-identically.
+    """
+    names = list(probes)
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            # Skip layer 0: its probe is all zeros (see train_probes).
+            cos = (probes[a][1:] * probes[b][1:]).sum(dim=-1)
+            print(f"  cos({a}, {b}) over layers 1+: min={cos.min():.3f} "
+                  f"median={cos.median():.3f} max={cos.max():.3f}")
 
 
 def main():
@@ -51,27 +68,35 @@ def main():
     model, tokenizer, n_layers = load_model(args.model)
 
     if args.load_probes:
-        probes = torch.load(args.load_probes)
+        probes = torch.load(args.load_probes)  # {variant_name: [n_layers, d_model]}
     else:
         with open(CONTRASTIVE_DATASET) as f:
             stems = [row["stem"].strip() for row in json.load(f)]
-        probes = train_probes(model, tokenizer, stems, n_layers, args.batch_size)
+        with open(SYSTEM_PROMPTS) as f:
+            variants = json.load(f)
+        probes = {}
+        for v in variants:
+            print(f"Variant '{v['name']}'")
+            probes[v["name"]] = train_probes(model, tokenizer, stems, v["eval"], v["deploy"], n_layers, args.batch_size)
         torch.save(probes, os.path.join(out_dir, "probes.pt"))
+    names = list(probes)
+    print_probe_similarity(probes)
 
     rows = load_evalawarebench(args.subset)
     if args.limit is not None:
         rows = random.Random(0).sample(rows, min(args.limit, len(rows)))
     print(f"Projecting {len(rows)} prompts from {EVALAWAREBENCH}/{args.subset}")
 
-    projections = project(model, tokenizer, probes, [r["prompt"] for r in rows], n_layers, args.batch_size)
+    stacked = torch.stack([probes[n] for n in names])
+    projections = project(model, tokenizer, stacked, [r["prompt"] for r in rows], n_layers, args.batch_size)
 
     out_path = os.path.join(out_dir, f"projections_{args.subset}{'' if args.limit is None else f'_n{args.limit}'}.jsonl")
     with open(out_path, "w") as f:
         for row, proj in zip(rows, projections.tolist()):
             meta = {k: row[k] for k in ("task_id", "task_name", "valence", "factors_varied", "num_factors_varied", "config")}
-            f.write(json.dumps({**meta, "projections": proj}) + "\n")
+            f.write(json.dumps({**meta, "projections": dict(zip(names, proj))}) + "\n")
 
-    print(f"\nDone. {len(rows)} rows x {n_layers} layers saved to {out_path}")
+    print(f"\nDone. {len(rows)} rows x {len(names)} variants x {n_layers} layers saved to {out_path}")
 
 
 if __name__ == "__main__":

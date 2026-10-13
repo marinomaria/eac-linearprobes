@@ -48,11 +48,17 @@ def project(model, tokenizer, probes, prompts, n_layers, batch_size=8):
     Returns:
         float32 tensor [len(prompts), n_variants, n_layers]
     """
+    return project_conversations(model, tokenizer, probes, [[{"role": "user", "content": p}] for p in prompts],
+                                 n_layers, batch_size)
+
+
+def project_conversations(model, tokenizer, probes, conversations, n_layers, batch_size=8):
+    """Like `project`, but each item is a full message list (e.g. with a system prompt)."""
+    formatted = [format_chat(tokenizer, c) for c in conversations]
     # Batch prompts of similar length together to minimize padding, then restore order.
-    order = sorted(range(len(prompts)), key=lambda i: len(prompts[i]))
-    out = torch.empty(len(prompts), probes.shape[0], n_layers)
+    order = sorted(range(len(formatted)), key=lambda i: len(formatted[i]))
+    out = torch.empty(len(formatted), probes.shape[0], n_layers)
     for idx in tqdm(list(batches(order, batch_size)), desc="Projecting"):
-        formatted = [format_chat(tokenizer, [{"role": "user", "content": prompts[i]}]) for i in idx]
-        acts = last_token_activations(model, tokenizer, formatted, n_layers)
+        acts = last_token_activations(model, tokenizer, [formatted[i] for i in idx], n_layers)
         out[idx] = torch.einsum("bld,kld->bkl", acts, probes)
     return out

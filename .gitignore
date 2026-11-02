@@ -1,7 +1,9 @@
 output/
+data/
 runpod-artifacts/
 .venv/
 __pycache__/
 .DS_Store
 *.log
 .ruff_cache/
+*.ipynb

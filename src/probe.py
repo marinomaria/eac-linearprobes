@@ -52,13 +52,37 @@ def project(model, tokenizer, probes, prompts, n_layers, batch_size=8):
                                  n_layers, batch_size)
 
 
-def project_conversations(model, tokenizer, probes, conversations, n_layers, batch_size=8):
-    """Like `project`, but each item is a full message list (e.g. with a system prompt)."""
+def token_budget_batches(order, lengths, batch_size, max_batch_tokens):
+    """Split `order` (sorted by ascending length) into batches of at most `batch_size` items whose
+    padded size (items x longest) stays within `max_batch_tokens`. A prompt longer than the budget
+    gets a batch of its own."""
+    batch = []
+    for i in order:
+        if batch and (len(batch) == batch_size or (len(batch) + 1) * lengths[i] > max_batch_tokens):
+            yield batch
+            batch = []
+        batch.append(i)
+    if batch:
+        yield batch
+
+
+def project_conversations(model, tokenizer, probes, conversations, n_layers, batch_size=8, max_batch_tokens=None):
+    """Like `project`, but each item is a full message list (e.g. with a system prompt).
+
+    max_batch_tokens caps a batch's padded size: hidden states for every layer and position are
+    kept during the forward pass, so long prompts need smaller batches.
+    """
     formatted = [format_chat(tokenizer, c) for c in conversations]
     # Batch prompts of similar length together to minimize padding, then restore order.
-    order = sorted(range(len(formatted)), key=lambda i: len(formatted[i]))
+    if max_batch_tokens is None:
+        order = sorted(range(len(formatted)), key=lambda i: len(formatted[i]))
+        chunks = list(batches(order, batch_size))
+    else:
+        lengths = [len(ids) for ids in tokenizer(formatted, add_special_tokens=False)["input_ids"]]
+        order = sorted(range(len(formatted)), key=lambda i: lengths[i])
+        chunks = list(token_budget_batches(order, lengths, batch_size, max_batch_tokens))
     out = torch.empty(len(formatted), probes.shape[0], n_layers)
-    for idx in tqdm(list(batches(order, batch_size)), desc="Projecting"):
+    for idx in tqdm(chunks, desc="Projecting"):
         acts = last_token_activations(model, tokenizer, [formatted[i] for i in idx], n_layers)
         out[idx] = torch.einsum("bld,kld->bkl", acts, probes)
     return out

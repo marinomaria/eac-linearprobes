@@ -26,6 +26,7 @@ adapted to this benchmark and to newer Qwen models.
 | Alias | HF repo | Role |
 |---|---|---|
 | `qwen3.8-27b` | `Qwen/Qwen3.8-27B` | Main model (RunPod, 1× 80GB GPU) |
+| `qwen3.5-27b` | `Qwen/Qwen3.5-27B` | Model of the shared jlens_evalaware measurements (data mix) |
 | `qwen3.5-0.8b` | `Qwen/Qwen3.5-0.8B` | Control: same `qwen3_5` architecture and chat template as Qwen3.8. There is no Qwen3.8 small model |
 
 Any other HF repo id can be passed to `--model` as well.
@@ -108,6 +109,33 @@ SSH_KEY=~/.ssh/id_ed25519_team bash scripts/download_artifacts.sh <IP> <PORT>   
 python scripts/analyze.py runpod-artifacts/qwen3.8-27b/projections_prompts.jsonl
 ```
 
+## Data mix
+
+`run_mix.py` scores the shared data mix of [jlens_evalaware](https://github.com/Spar2026EvalAware/jlens_evalaware)
+(`src/evalaware/mix.py`): EvalAwareBench, bare HarmBench, FORTRESS and MASK prompts, split into a main
+(1,890 prompts) and a discovery set (1,510). Probes are trained (or loaded) exactly as in `run.py`. Each prompt is
+fed as its full message list, so MASK prompts keep their own system prompt (and doubling_down its scripted first
+exchange). Build the mix in jlens_evalaware and copy it into `data/` (gitignored):
+
+```bash
+# in jlens_evalaware
+uv run evalaware mix --out-dir ../evaluation-awareness-convergence/data   # mix-main.jsonl, mix-discovery.jsonl
+
+# here
+python run_mix.py --model qwen3.5-0.8b --limit 50                         # quick test, both sets
+SCRIPT=run_mix.py bash scripts/runpod_run.sh qwen3.8-27b --batch-size 16 \
+    --load-probes output/qwen3.8-27b/probes.pt                             # on RunPod
+```
+
+On a pod without the mix, copy it over with
+`scp -P <PORT> data/mix-*.jsonl root@<IP>:/workspace/eval-awareness/data/` (or point `--data` at the files on
+the shared volume, `/workspace/code/<name>/data/mix-*.jsonl`).
+
+Mix prompts reach ~17k tokens, and the forward pass keeps every layer's hidden states, so batches are also capped
+at `--max-batch-tokens` padded tokens (default 16384: about 11 GB of hidden states for the 27B). Output goes to
+`output/<model>/projections_mix-{main,discovery}.jsonl`, one line per prompt with `id`, `dataset`, `meta` (as in
+the mix: `set`, `unit`, and the source's fields such as `factors`, `condition`, `archetype`) and `projections`.
+
 ## Probe sanity checks
 
 `validate.py` reuses `output/<model>/probes.pt` and projects short hand-written cues from
@@ -148,6 +176,7 @@ out; rejoin it on (`task_id`, `config`) if needed.
 
 ```
 run.py                     # Train probes, score EvalAwareBench, save output
+run_mix.py                 # Score the jlens_evalaware data mix (main + discovery sets)
 validate.py                # Project hand-written sanity-check cues onto saved probes
 src/model.py               # Model loading + last-token residual stream for all layers
 src/probe.py               # Probe training (mean difference) and projection

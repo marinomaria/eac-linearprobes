@@ -53,6 +53,28 @@ def print_probe_similarity(probes):
                   f"median={cos.median():.3f} max={cos.max():.3f}")
 
 
+def get_probes(model, tokenizer, n_layers, out_dir, load_path=None, batch_size=8):
+    """Load saved probes, or train one probe set per system-prompt variant and save it to out_dir/probes.pt.
+
+    Returns:
+        {variant_name: float32 tensor [n_layers, d_model]}
+    """
+    if load_path:
+        probes = torch.load(load_path)
+    else:
+        with open(CONTRASTIVE_DATASET) as f:
+            stems = [row["stem"].strip() for row in json.load(f)]
+        with open(SYSTEM_PROMPTS) as f:
+            variants = json.load(f)
+        probes = {}
+        for v in variants:
+            print(f"Variant '{v['name']}'")
+            probes[v["name"]] = train_probes(model, tokenizer, stems, v["eval"], v["deploy"], n_layers, batch_size)
+        torch.save(probes, os.path.join(out_dir, "probes.pt"))
+    print_probe_similarity(probes)
+    return probes
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True, help="Alias from src/model.py:MODELS or HF repo id")
@@ -67,20 +89,8 @@ def main():
 
     model, tokenizer, n_layers = load_model(args.model)
 
-    if args.load_probes:
-        probes = torch.load(args.load_probes)  # {variant_name: [n_layers, d_model]}
-    else:
-        with open(CONTRASTIVE_DATASET) as f:
-            stems = [row["stem"].strip() for row in json.load(f)]
-        with open(SYSTEM_PROMPTS) as f:
-            variants = json.load(f)
-        probes = {}
-        for v in variants:
-            print(f"Variant '{v['name']}'")
-            probes[v["name"]] = train_probes(model, tokenizer, stems, v["eval"], v["deploy"], n_layers, args.batch_size)
-        torch.save(probes, os.path.join(out_dir, "probes.pt"))
+    probes = get_probes(model, tokenizer, n_layers, out_dir, args.load_probes, args.batch_size)
     names = list(probes)
-    print_probe_similarity(probes)
 
     rows = load_evalawarebench(args.subset)
     if args.limit is not None:

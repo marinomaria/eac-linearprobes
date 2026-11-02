@@ -11,6 +11,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 MODELS = {
     "qwen3.5-0.8b": "Qwen/Qwen3.5-0.8B",
     "qwen3.8-27b": "Qwen/Qwen3.8-27B",
+    "qwen3.5-27b": "Qwen/Qwen3.5-27B",
 }
 
 

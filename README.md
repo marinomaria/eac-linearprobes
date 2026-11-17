@@ -155,6 +155,42 @@ python scripts/analyze_validation.py output/qwen3.5-0.8b/validation.jsonl
 reports AUROC between eval- and deploy-expected cues. A probe that tracks evaluation awareness rather than
 keywords should leave neutral cues near the no-cue baseline (`none`) and flip on negations.
 
+## Learned probes (logistic / MLP ensembles)
+
+An alternative to the mean-difference probes, after the FIBS paper's LinearEnsemble and MLPEnsemble
+(Hollinsworth, Spies et al., arXiv 2610.12445). Training data is a set of labeled conversation rows, so it is
+not limited to the paired stem design. Activations are extracted once and stored, then probes are trained any
+number of times.
+
+1. **Rows** (`src/rows.py`): one JSON object per line with `id`, `messages`, `label` (`eval`/`deploy`, or null
+   for score-only rows), `group` (rows that must stay on the same side of a split, e.g. both versions of a
+   stem) and `family` (the kind of data, for leave-family-out evaluation). `--data dolly` rebuilds the
+   current paired design in this format (family `sysprompt:<variant>`, group = stem).
+2. **Extract** (`extract.py`): last-token activations for 6 layers between 30% and 90% of depth, stored as
+   bf16 in `output/<model>/acts/<name>/` (rows x 6 x d_model x 2 bytes; ~9 GB for 150k rows on the 27B).
+3. **Train** (`train_probes.py`): per layer, a logistic and an MLP probe (BCE, AdamW lr 5e-3, batch 32), plus
+   `linear_ensemble` / `mlp_ensemble` (mean logit over layers with train loss < 0.6). Validation split by
+   group; `--holdout-family` holds out whole families. Reports AUROC and recall at 1% FPR with 95% CIs from a
+   bootstrap over groups (`report.csv`).
+4. **Use**: `export.pt` holds the logistic probes as `{"logreg": [n_layers, d_model]}`, so it works with
+   `run.py`/`run_mix.py --load-probes` and `validate.py --probes`; `scripts/add_ensemble.py` then adds the
+   `logreg_ensemble` variant to their output. MLP probes need activations: `extract.py` the set, then `score.py`.
+
+```bash
+python extract.py --model qwen3.5-0.8b --data dolly --limit 40                    # ~1 min on an M-series Mac
+python train_probes.py output/qwen3.5-0.8b/acts/dolly_n40 --holdout-family sysprompt:minimal
+python validate.py --model qwen3.5-0.8b --probes output/qwen3.5-0.8b/trained/dolly_n40/export.pt --n-stems 4
+python scripts/add_ensemble.py output/qwen3.5-0.8b/validation.jsonl output/qwen3.5-0.8b/trained/dolly_n40/ensemble.json
+python scripts/analyze_validation.py output/qwen3.5-0.8b/validation_ens.jsonl --variant logreg_ensemble
+
+python extract.py --model qwen3.8-27b --data data/mix-main.jsonl                  # score-only rows
+python score.py output/qwen3.8-27b/trained/<name> output/qwen3.8-27b/acts/mix-main
+```
+
+Do not train on EvalAwareBench (license) or on the data mix (it is the measurement set); score them only.
+With small training sets the MLP probes overfit (near-zero train loss, so the 0.6 filter keeps every layer);
+compare them with the linear probes on held-out families before relying on them.
+
 ## Output format
 
 Each line of `projections_*.jsonl` holds the prompt's `task_id`, `task_name`, `valence`, `factors_varied`,
@@ -178,10 +214,17 @@ out; rejoin it on (`task_id`, `config`) if needed.
 run.py                     # Train probes, score EvalAwareBench, save output
 run_mix.py                 # Score the jlens_evalaware data mix (main + discovery sets)
 validate.py                # Project hand-written sanity-check cues onto saved probes
+extract.py                 # Store last-token activations of labeled/unlabeled rows for learned probes
+train_probes.py            # Train logistic/MLP probes + ensembles, leave-family-out metrics
+score.py                   # Score stored activations with trained probes
 src/model.py               # Model loading + last-token residual stream for all layers
 src/probe.py               # Probe training (mean difference) and projection
+src/rows.py                # Labeled-rows format, Dolly pairs as rows, group split
+src/activations.py         # Activation extraction and on-disk storage
+src/classifiers.py         # Per-layer logistic/MLP probes, ensembles, metrics
 scripts/analyze.py         # Per-layer summary + per-factor effects
 scripts/analyze_validation.py  # Sanity-check scores per cue category and placement
+scripts/add_ensemble.py   # Add linear-ensemble scores to projections from an export.pt
 scripts/runpod_*.sh        # RunPod setup / run
 scripts/download_artifacts.sh
 datasets/contrastive_dataset_dolly.json

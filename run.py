@@ -31,6 +31,7 @@ CONTRASTIVE_DATASET = "datasets/contrastive_dataset_dolly.json"
 SYSTEM_PROMPTS = "datasets/system_prompts.json"
 EVALAWAREBENCH = "aisa-group/EvalAwareBench"
 OUTPUT_DIR = "output"
+EVALAWAREBENCH_FIELDS = ("task_id", "task_name", "valence", "factors_varied", "num_factors_varied", "config")
 
 
 def load_evalawarebench(subset):
@@ -103,7 +104,7 @@ def main():
     out_path = os.path.join(out_dir, f"projections_{args.subset}{'' if args.limit is None else f'_n{args.limit}'}.jsonl")
     with open(out_path, "w") as f:
         for row, proj in zip(rows, projections.tolist()):
-            meta = {k: row[k] for k in ("task_id", "task_name", "valence", "factors_varied", "num_factors_varied", "config")}
+            meta = {k: row[k] for k in EVALAWAREBENCH_FIELDS}
             f.write(json.dumps({**meta, "projections": dict(zip(names, proj))}) + "\n")
 
     print(f"\nDone. {len(rows)} rows x {len(names)} variants x {n_layers} layers saved to {out_path}")

@@ -4,8 +4,9 @@ Extract last-token activations for labeled (or unlabeled) conversation rows and 
 for train_probes.py (training) and score.py (scoring with trained probes). Format: see src/rows.py and
 src/activations.py.
 
---data accepts:
-  - a rows .jsonl (src/rows.py format; the data mix files already have id/messages/meta)
+--data accepts one or more of (several are concatenated into one activation directory, e.g. a training set):
+  - a rows .jsonl (src/rows.py format; the data mix files already have id/messages/meta; Needham et al.'s
+    dataset via scripts/prepare_needham.py)
   - "dolly": the original paired design, every contrastive stem under every system-prompt variant
   - "evalawarebench[:subset]": EvalAwareBench prompts as single user turns (unlabeled)
 
@@ -14,7 +15,7 @@ Layers default to 6 evenly spaced between 30% and 90% of depth; --layers overrid
 
 Usage:
     python extract.py --model qwen3.5-0.8b --data dolly --limit 40
-    python extract.py --model qwen3.8-27b --data data/train_rows.jsonl --batch-size 16
+    python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl --out output/qwen3.8-27b/acts/dolly+needham
     python extract.py --model qwen3.8-27b --data evalawarebench --out output/qwen3.8-27b/acts/evalawarebench
 """
 import argparse
@@ -39,7 +40,7 @@ def build_rows(data, limit):
     if data.startswith("evalawarebench"):
         subset = data.partition(":")[2] or "prompts"
         rows = [{"id": str(i), "messages": [{"role": "user", "content": r["prompt"]}], "label": None,
-                 "group": str(r["task_id"]), "family": "evalawarebench",
+                 "group": str(r["task_id"]), "family": "evalawarebench", "source": "evalawarebench",
                  "meta": {k: r[k] for k in EVALAWAREBENCH_FIELDS}}
                 for i, r in enumerate(load_evalawarebench(subset))]
     else:
@@ -52,16 +53,21 @@ def build_rows(data, limit):
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--model", required=True, help="Alias from src/model.py:MODELS or HF repo id")
-    parser.add_argument("--data", required=True, help='Rows .jsonl, "dolly" or "evalawarebench[:subset]"')
+    parser.add_argument("--data", required=True, nargs="+",
+                        help='Rows .jsonl, "dolly" or "evalawarebench[:subset]"; several are concatenated')
     parser.add_argument("--out", default=None, help="Output directory (default: output/<model>/acts/<data name>)")
     parser.add_argument("--layers", type=int, nargs="+", default=None)
-    parser.add_argument("--limit", type=int, default=None, help="Seeded random sample (stems, for dolly)")
+    parser.add_argument("--limit", type=int, default=None,
+                        help="Seeded random sample per --data source (stems, for dolly)")
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--max-batch-tokens", type=int, default=16384)
     args = parser.parse_args()
 
-    rows = build_rows(args.data, args.limit)
-    name = os.path.splitext(os.path.basename(args.data))[0].replace(":", "_")
+    rows = [r for data in args.data for r in build_rows(data, args.limit)]
+    ids = [r["id"] for r in rows]
+    if len(set(ids)) != len(ids):
+        parser.error("duplicate row ids across --data sources")
+    name = "+".join(os.path.splitext(os.path.basename(d))[0].replace(":", "_") for d in args.data)
     out = args.out or os.path.join(OUTPUT_DIR, args.model.replace("/", "_"), "acts",
                                    name + ("" if args.limit is None else f"_n{args.limit}"))
 

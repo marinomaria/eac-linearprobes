@@ -3,12 +3,16 @@ Labeled conversation rows: the training-data format for learned probes.
 
 One JSON object per line:
     {"id": str, "messages": [{"role", "content"}, ...],
-     "label": "eval" | "deploy" | null, "group": str, "family": str, "meta": {...}}
+     "label": "eval" | "deploy" | null, "group": str, "family": str, "source": str, "meta": {...},
+     "tools": [...] | null}
 
 - label: null for rows that are only scored (e.g. EvalAwareBench, the data mix).
 - group: rows that must stay on the same side of a split, e.g. the eval and deploy versions of one stem.
   Splits and bootstrap CIs are by group.
 - family: the kind of data (e.g. "sysprompt:default", "real_chat"). Whole families can be held out.
+- source: the dataset a row comes from (default: the family's first ":" component). train_probes.py --balance
+  weights sources equally, so a large or long-prompt dataset does not dominate the probe.
+- tools: optional OpenAI-style tool definitions, rendered by the chat template (agentic transcripts).
 """
 import hashlib
 import json
@@ -24,7 +28,9 @@ def read_rows(path):
         r.setdefault("label", None)
         r.setdefault("group", r["id"])
         r.setdefault("family", "default")
+        r.setdefault("source", r["family"].split(":")[0])
         r.setdefault("meta", {})
+        r.setdefault("tools", None)
     return rows
 
 
@@ -36,7 +42,7 @@ def dolly_rows(stems, variants):
         for i, stem in enumerate(stems):
             for label in ("eval", "deploy"):
                 rows.append({"id": f"dolly:{i}:{v['name']}:{label}", "label": label, "group": f"dolly:{i}",
-                             "family": f"sysprompt:{v['name']}", "meta": {},
+                             "family": f"sysprompt:{v['name']}", "source": "dolly", "meta": {},
                              "messages": [{"role": "system", "content": v[label]},
                                           {"role": "user", "content": stem}]})
     return rows

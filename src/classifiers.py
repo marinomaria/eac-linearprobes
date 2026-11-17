@@ -39,33 +39,53 @@ class LayerProbe(nn.Module):
         return w, self.net.bias[0] - (w * self.mean).sum()
 
 
-def train_layer_probe(x, y, hidden=0, epochs=None, lr=5e-3, batch_size=32, weight_decay=0.01, seed=0, device="cpu"):
+def train_layer_probe(x, y, hidden=0, epochs=None, lr=5e-3, batch_size=32, weight_decay=0.01, seed=0, device="cpu",
+                      weights=None):
     """x: float32 [n, d], y: float32 [n] in {0, 1}. Returns (probe on CPU, final train BCE).
 
+    weights: optional per-row loss weights [n] (see balance_weights); the reported BCE is weighted too.
     epochs=None: at least MIN_EPOCHS and at least MIN_STEPS optimizer steps (small datasets underfit otherwise).
     """
     torch.manual_seed(seed)
     mean, std = x.mean(0), x.std(0).clamp_min(1e-6)
     probe = LayerProbe(x.shape[1], mean, std, hidden).to(device)
-    x, y = x.to(device), y.to(device)
+    w = torch.ones_like(y) if weights is None else weights / weights.mean()
+    x, y, w = x.to(device), y.to(device), w.to(device)
     opt = torch.optim.AdamW(probe.parameters(), lr=lr, weight_decay=weight_decay)
     per_epoch = math.ceil(len(x) / batch_size)
     if epochs is None:
         epochs = max(MIN_EPOCHS, math.ceil(MIN_STEPS / per_epoch))
     steps = epochs * per_epoch
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, steps)
-    loss_fn = nn.BCEWithLogitsLoss()
+    bce = nn.BCEWithLogitsLoss(reduction="none")
+
+    def loss_fn(idx):
+        return (bce(probe(x[idx]), y[idx]) * w[idx]).sum() / w[idx].sum()
+
     probe.train()
     for _ in range(epochs):
         for idx in torch.randperm(len(x), device=device).split(batch_size):
             opt.zero_grad()
-            loss_fn(probe(x[idx]), y[idx]).backward()
+            loss_fn(idx).backward()
             opt.step()
             sched.step()
     probe.eval()
     with torch.no_grad():
-        train_loss = loss_fn(probe(x), y).item()
+        train_loss = loss_fn(torch.arange(len(x), device=device)).item()
     return probe.cpu(), train_loss
+
+
+def balance_weights(y, sources, mode="source"):
+    """Per-row weights giving every (source, label) cell ("source") or every label ("label") the same total
+    weight; "none": all ones. Mean 1."""
+    if mode == "none":
+        return np.ones(len(y))
+    keys = list(zip(sources, y, strict=True)) if mode == "source" else list(y)
+    counts = {}
+    for k in keys:
+        counts[k] = counts.get(k, 0) + 1
+    w = np.array([1 / counts[k] for k in keys])
+    return w / w.mean()
 
 
 def kept_layers(train_losses):

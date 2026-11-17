@@ -164,14 +164,19 @@ number of times.
 
 1. **Rows** (`src/rows.py`): one JSON object per line with `id`, `messages`, `label` (`eval`/`deploy`, or null
    for score-only rows), `group` (rows that must stay on the same side of a split, e.g. both versions of a
-   stem) and `family` (the kind of data, for leave-family-out evaluation). `--data dolly` rebuilds the
-   current paired design in this format (family `sysprompt:<variant>`, group = stem).
+   stem), `family` (the kind of data, for leave-family-out evaluation), `source` (the dataset, for loss
+   balancing) and optional `tools` (agentic transcripts). `--data dolly` rebuilds the current paired design in
+   this format (family `sysprompt:<variant>`, group = stem, source `dolly`).
 2. **Extract** (`extract.py`): last-token activations for 6 layers between 30% and 90% of depth, stored as
    bf16 in `output/<model>/acts/<name>/` (rows x 6 x d_model x 2 bytes; ~9 GB for 150k rows on the 27B).
+   Several `--data` sources go into one directory. Only the stored layers' last token is kept during the
+   forward pass, so long transcripts fit in memory.
 3. **Train** (`train_probes.py`): per layer, a logistic and an MLP probe (BCE, AdamW lr 5e-3, batch 32), plus
    `linear_ensemble` / `mlp_ensemble` (mean logit over layers with train loss < 0.6). Validation split by
-   group; `--holdout-family` holds out whole families. Reports AUROC and recall at 1% FPR with 95% CIs from a
-   bootstrap over groups (`report.csv`).
+   group; `--holdout-family` holds out whole families (patterns such as `'needham:agent:*'` work).
+   `--balance source` (default) gives every (source, label) cell the same total loss weight. Reports AUROC and
+   recall at 1% FPR with 95% CIs from a bootstrap over groups, overall, per source and per family
+   (`report.csv`), next to `length_baseline`, a logistic regression on log prompt length alone.
 4. **Use**: `export.pt` holds the logistic probes as `{"logreg": [n_layers, d_model]}`, so it works with
    `run.py`/`run_mix.py --load-probes` and `validate.py --probes`; `scripts/add_ensemble.py` then adds the
    `logreg_ensemble` variant to their output. MLP probes need activations: `extract.py` the set, then `score.py`.
@@ -183,6 +188,11 @@ python validate.py --model qwen3.5-0.8b --probes output/qwen3.5-0.8b/trained/dol
 python scripts/add_ensemble.py output/qwen3.5-0.8b/validation.jsonl output/qwen3.5-0.8b/trained/dolly_n40/ensemble.json
 python scripts/analyze_validation.py output/qwen3.5-0.8b/validation_ens.jsonl --variant logreg_ensemble
 
+# Dolly + Needham et al. (see below)
+python scripts/prepare_needham.py <dir>/dataset.json                               # -> data/needham_rows.jsonl
+python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl --out output/qwen3.8-27b/acts/dolly+needham
+python train_probes.py output/qwen3.8-27b/acts/dolly+needham --holdout-family 'needham:agent:*' --name hold-agent
+
 python extract.py --model qwen3.8-27b --data data/mix-main.jsonl                  # score-only rows
 python score.py output/qwen3.8-27b/trained/<name> output/qwen3.8-27b/acts/mix-main
 ```
@@ -190,6 +200,33 @@ python score.py output/qwen3.8-27b/trained/<name> output/qwen3.8-27b/acts/mix-ma
 Do not train on EvalAwareBench (license) or on the data mix (it is the measurement set); score them only.
 With small training sets the MLP probes overfit (near-zero train loss, so the 0.6 filter keeps every layer);
 compare them with the linear probes on held-out families before relying on them.
+
+### Needham et al. data
+
+[jjpn2/eval_awareness](https://huggingface.co/datasets/jjpn2/eval_awareness) (Needham et al.,
+[arXiv 2505.23836](https://arxiv.org/abs/2505.23836); gated, CC BY-NC-SA, contains GAIA, so keep it and
+`data/needham_rows.jsonl` out of git; `data/` is gitignored): 976 real or evaluation transcripts from 61 source
+datasets, half chat and half agentic. `scripts/prepare_needham.py` converts the decrypted `dataset.json`
+(download and password: see its docstring). Choices worth knowing:
+
+- Every source dataset is all-eval or all-deploy, so **group = source dataset**: the val split and the CIs measure
+  transfer to unseen datasets; a per-transcript split would let the probe recognise a dataset's template.
+- Family `needham:{chat|agent}:<dataset>`, source `needham_chat` / `needham_agent`.
+- Trailing assistant turns are dropped (read where the model would reply, like the Dolly prompts); later system
+  messages become user messages (Qwen's template only takes a leading one); transcripts over 16k tokens drop
+  middle messages (127 agentic ones).
+
+Lengths (Qwen tokens; medians): Dolly ~80 with no eval/deploy difference; Needham chat 93 eval / 148 deploy;
+agentic 5.7k eval / 11k deploy (up to 85k before truncation). Within Needham, length alone separates the labels
+(AUROC ~0.6, deploy longer), and the sources differ by orders of magnitude, so:
+
+- `--balance source` weights Dolly, Needham chat and Needham agentic equally, with labels balanced within each,
+  so neither the 1224 Dolly rows nor the long transcripts dominate.
+- Compare every probe with `length_baseline` per source; a probe close to it is likely reading length.
+- Hold out a source (`'needham:agent:*'`, `'needham:chat:*'`, `'sysprompt:*'`) to see whether one kind of data
+  transfers to the other.
+- Extraction cost is set by the agentic transcripts (~4M tokens after truncation, vs ~0.1M for Dolly); with
+  `--max-batch-tokens 16384` they run one per batch.
 
 ## Output format
 
@@ -205,6 +242,8 @@ out; rejoin it on (`task_id`, `config`) if needed.
 - Contrastive prompt stems: taken from
   [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) (CC BY-SA 3.0),
   as built in [sensitivity-analysis-evaluation-awareness](https://github.com/marinomaria/sensitivity-analysis-evaluation-awareness).
+- Needham et al., [*Large Language Models Often Know When They Are Being Evaluated*](https://arxiv.org/abs/2505.23836):
+  [jjpn2/eval_awareness](https://huggingface.co/datasets/jjpn2/eval_awareness) (CC BY-NC-SA 4.0, gated).
 - EvalAwareBench: Li et al., [*Decomposing and Measuring Evaluation Awareness*](https://arxiv.org/abs/2605.23055)
   (CC BY-NC 4.0; not to be used as training data).
 
@@ -225,6 +264,7 @@ src/classifiers.py         # Per-layer logistic/MLP probes, ensembles, metrics
 scripts/analyze.py         # Per-layer summary + per-factor effects
 scripts/analyze_validation.py  # Sanity-check scores per cue category and placement
 scripts/add_ensemble.py   # Add linear-ensemble scores to projections from an export.pt
+scripts/prepare_needham.py # Needham et al. transcripts -> labeled rows
 scripts/runpod_*.sh        # RunPod setup / run
 scripts/download_artifacts.sh
 datasets/contrastive_dataset_dolly.json

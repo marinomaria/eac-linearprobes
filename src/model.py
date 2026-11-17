@@ -47,14 +47,15 @@ def load_model(name, dtype=torch.bfloat16):
     return model, tokenizer, n_layers
 
 
-def format_chat(tokenizer, messages):
+def format_chat(tokenizer, messages, tools=None):
     """Apply the chat template, ending at the assistant generation prompt.
 
     Thinking mode is set explicitly: Qwen3.8's template defaults to it but Qwen3.5-0.8B's does not
     (it appends an empty think block), so without the flag the two models are read at different tokens.
-    With it, every prompt ends in `<think>\\n`.
+    With it, every prompt ends in `<think>\\n`. `tools`: OpenAI-style tool definitions, rendered by the template.
     """
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
+    return tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, add_generation_prompt=True,
+                                         enable_thinking=True)
 
 
 @torch.no_grad()

@@ -8,6 +8,7 @@ mean/std; the ensemble averages logits; the MLP has one hidden layer of 256 unit
 decay over a fixed number of epochs.
 """
 import math
+import os
 
 import numpy as np
 import torch
@@ -73,6 +74,37 @@ def train_layer_probe(x, y, hidden=0, epochs=None, lr=5e-3, batch_size=32, weigh
     with torch.no_grad():
         train_loss = loss_fn(torch.arange(len(x), device=device)).item()
     return probe.cpu(), train_loss
+
+
+def load_trained(trained_dir):
+    """probes.pt written by train_probes.py -> (saved dict, {kind: [LayerProbe per stored layer]})."""
+    saved = torch.load(os.path.join(trained_dir, "probes.pt"))
+    probes = {}
+    for kind, hidden in (("linear", 0), ("mlp", saved["mlp_hidden"])):
+        probes[kind] = []
+        for state in saved["state"][kind]:
+            probe = LayerProbe(state["mean"].shape[0], state["mean"], state["std"], hidden)
+            probe.load_state_dict(state)
+            probes[kind].append(probe.eval())
+    return saved, probes
+
+
+@torch.no_grad()
+def score_all(saved, probes, layer_x, device="cpu", chunk=4096):
+    """layer_x(layer) -> float32 [n, d]. Returns {probe name: logits [n]} for every per-layer probe and the
+    linear / mlp ensembles (mean logit over the kept layers), as reported by train_probes.py."""
+    layers = saved["info"]["layers"]
+    scores = {}
+    for j, layer in enumerate(layers):
+        x = layer_x(layer)
+        for kind, ps in probes.items():
+            p = ps[j].to(device)
+            scores[f"{kind}_L{layer}"] = torch.cat([p(x[i:i + chunk].to(device)).cpu()
+                                                    for i in range(0, len(x), chunk)]).numpy()
+            ps[j] = p.cpu()
+    for kind, kept in saved["kept"].items():
+        scores[f"{kind}_ensemble"] = np.mean([scores[f"{kind}_L{layers[j]}"] for j in kept], axis=0)
+    return scores
 
 
 def balance_weights(y, sources, mode="source"):

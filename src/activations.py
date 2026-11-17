@@ -68,6 +68,18 @@ def _last_token(model, tokenizer, prompts, layers, blocks):
     return torch.stack([got[layer] for layer in layers], dim=1)
 
 
+def last_token_layers(model, tokenizer, formatted, layers, n_layers, batch_size=8, max_batch_tokens=16384):
+    """bf16 [n, len(layers), d_model]: last-token residual stream entering each block in layers, for each
+    already-formatted prompt (in input order)."""
+    blocks = _decoder_layers(model, n_layers)
+    lengths = [len(ids) for ids in tokenizer(formatted, add_special_tokens=False)["input_ids"]]
+    order = sorted(range(len(formatted)), key=lambda i: lengths[i])
+    out = torch.empty(len(formatted), len(layers), model.config.get_text_config().hidden_size, dtype=torch.bfloat16)
+    for idx in tqdm(list(token_budget_batches(order, lengths, batch_size, max_batch_tokens)), desc="Extracting"):
+        out[idx] = _last_token(model, tokenizer, [formatted[i] for i in idx], layers, blocks)
+    return out
+
+
 def extract(model, tokenizer, rows, layers, n_layers, out_dir, model_name, batch_size=8, max_batch_tokens=16384):
     if max(layers) >= n_layers:
         raise ValueError(f"layers must be < {n_layers} (residual stream entering a block)")

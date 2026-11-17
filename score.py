@@ -13,15 +13,12 @@ import argparse
 import json
 import os
 
-import numpy as np
 import pandas as pd
-import torch
 
 from src.activations import layer_tensor, load
-from src.classifiers import LayerProbe, metrics
+from src.classifiers import load_trained, metrics, score_all
 from src.model import get_device
 from src.rows import LABELS
-from train_probes import logits
 
 
 def main():
@@ -31,24 +28,14 @@ def main():
     parser.add_argument("--n-boot", type=int, default=1000)
     args = parser.parse_args()
 
-    saved = torch.load(os.path.join(args.trained, "probes.pt"))
+    saved, probes = load_trained(args.trained)
     acts, rows, info = load(args.acts)
     layers = saved["info"]["layers"]
     if info["model"] != saved["info"]["model"] or not set(layers) <= set(info["layers"]):
         parser.error(f"activations ({info['model']}, layers {info['layers']}) do not match probes "
                      f"({saved['info']['model']}, layers {layers})")
 
-    device = get_device()
-    scores = {}
-    for j, layer in enumerate(layers):
-        x = layer_tensor(acts, info["layers"].index(layer))
-        for kind, hidden in (("linear", 0), ("mlp", saved["mlp_hidden"])):
-            state = saved["state"][kind][j]
-            probe = LayerProbe(x.shape[1], state["mean"], state["std"], hidden)
-            probe.load_state_dict(state)
-            scores[f"{kind}_L{layer}"] = logits(probe.eval(), x, device)
-    for kind, kept in saved["kept"].items():
-        scores[f"{kind}_ensemble"] = np.mean([scores[f"{kind}_L{layers[j]}"] for j in kept], axis=0)
+    scores = score_all(saved, probes, lambda layer: layer_tensor(acts, info["layers"].index(layer)), get_device())
 
     name = os.path.basename(os.path.normpath(args.acts))
     out_path = os.path.join(args.trained, f"scores_{name}.jsonl")

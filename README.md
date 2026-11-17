@@ -146,9 +146,23 @@ Each cue is shown as the system prompt before a contrastive stem (the training s
 the user turn (the benchmark shape), and alone as the user turn. The system/prefix placements average over
 `--n-stems` stems (default 20; these are training stems). The variants' training prompts are added as anchors.
 
+The cues come from `datasets/validation_prompts.json` and the zero-tolerance set
+`datasets/validation_prompts_zt.csv` (`--prompts` to change; each output row records its file as `set`).
+
 ```bash
 python validate.py --model qwen3.5-0.8b --n-stems 4                 # ~1.5 min on an M-series Mac
 python scripts/analyze_validation.py output/qwen3.5-0.8b/validation.jsonl
+python scripts/analyze_validation.py output/qwen3.5-0.8b/validation.jsonl --set validation_prompts_zt
+```
+
+`--trained <dir> [<dir> ...]` scores the cues with every probe in `train_probes.py` output directories
+(`linear_L*`, `mlp_L*`, `linear_ensemble`, `mlp_ensemble`), from one extraction, and writes
+`<dir>/validation.jsonl` for each; with `--probes` too, the direction probes run in the same model load:
+
+```bash
+python validate.py --model qwen3.8-27b --batch-size 16 --probes output/qwen3.8-27b/probes.pt \
+    --trained output/qwen3.8-27b/trained/all output/qwen3.8-27b/trained/hold-agent
+python scripts/analyze_validation.py output/qwen3.8-27b/trained/all/validation.jsonl --variant mlp_ensemble
 ```
 
 `analyze_validation.py` scores every cue on a 0 (deploy anchors) to 1 (eval anchors) scale per placement and

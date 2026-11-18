@@ -222,11 +222,17 @@ python scripts/prepare_wildchat.py                                              
 python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl data/awarebench_rows.jsonl \
     data/wildchat_rows.jsonl --out output/qwen3.8-27b/acts/dolly+needham+awarebench+wildchat
 
+# + mix-discovery rows labeled by the model's own CoT voicing (see below)
+python scripts/prepare_verbalized.py                                              # -> data/verbalized_rows.jsonl
+python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl data/awarebench_rows.jsonl \
+    data/wildchat_rows.jsonl data/verbalized_rows.jsonl --out output/qwen3.8-27b/acts/full
+
 python extract.py --model qwen3.8-27b --data data/mix-main.jsonl                  # score-only rows
 python score.py output/qwen3.8-27b/trained/<name> output/qwen3.8-27b/acts/mix-main
 ```
 
-Do not train on EvalAwareBench (license) or on the data mix (it is the measurement set); score them only.
+Never train on mix-main: it is the measurement set, score it only. mix-discovery may be trained on (as in
+`prepare_verbalized.py`), and so may EvalAwareBench for probes (its license restricts training LLMs, not classifiers).
 With small training sets the MLP probes overfit (near-zero train loss, so the 0.6 filter keeps every layer);
 compare them with the linear probes on held-out families before relying on them.
 
@@ -285,6 +291,16 @@ aware-bench's agentic eval transcripts are longer than its deploy ones, the oppo
 no longer points one way. `--balance source` gives both labels equal weight and splits each label's weight equally
 over its sources, so deploy-only WildChat does not tip the balance. Together they add ~2M tokens to extraction.
 
+### Verbalized mix-discovery rows
+
+`data/probe_sample_verbalized.csv`: 293 mix-discovery prompts (EvalAwareBench 213, MASK 60, FORTRESS 10, HarmBench 10)
+with how often Qwen voiced evaluation awareness in its CoT over 4 rollouts. `scripts/prepare_verbalized.py` labels
+`voicing_rate >= 0.5` as eval (152) and the rest deploy (141): the label is the model's own judgement, not where the
+prompt came from. It exits if any row's id, messages or item (EvalAwareBench family, MASK/FORTRESS/HarmBench item)
+is in mix-main. Group = the item, so cue/stratum variants of one task stay together (117 groups); family
+`verbalized:<dataset>:<stratum>`, source `verbalized` (one source, so the 10-row datasets are not upweighted).
+Median tokens eval / deploy 261 / 240.
+
 ## Output format
 
 Each line of `projections_*.jsonl` holds the prompt's `task_id`, `task_name`, `valence`, `factors_varied`,
@@ -324,6 +340,7 @@ scripts/add_ensemble.py   # Add linear-ensemble scores to projections from an ex
 scripts/prepare_needham.py # Needham et al. transcripts -> labeled rows
 scripts/prepare_awarebench.py  # aware-bench (EvalDetectBench) trajectories -> labeled rows
 scripts/prepare_wildchat.py    # Filtered WildChat sample -> deploy rows
+scripts/prepare_verbalized.py  # mix-discovery prompts labeled by CoT voicing rate -> labeled rows
 scripts/runpod_*.sh        # RunPod setup / run
 scripts/download_artifacts.sh
 datasets/contrastive_dataset_dolly.json

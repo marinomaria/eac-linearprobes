@@ -165,6 +165,15 @@ python validate.py --model qwen3.8-27b --batch-size 16 --probes output/qwen3.8-2
 python scripts/analyze_validation.py output/qwen3.8-27b/trained/all/validation.jsonl --variant mlp_ensemble
 ```
 
+To score new probes on the cues without a GPU, store the cue activations once (`--data cues`: the same cues,
+placements and 20 stems, as unlabeled rows), then score any trained directory from them; this gives the same
+`validation.jsonl` as running the model:
+
+```bash
+python extract.py --model qwen3.8-27b --data cues                                   # on a GPU, once
+python validate.py --acts output/qwen3.8-27b/acts/cues --trained output/qwen3.8-27b/trained/<name>
+```
+
 `analyze_validation.py` scores every cue on a 0 (deploy anchors) to 1 (eval anchors) scale per placement and
 reports AUROC between eval- and deploy-expected cues. A probe that tracks evaluation awareness rather than
 keywords should leave neutral cues near the no-cue baseline (`none`) and flip on negations.
@@ -207,6 +216,12 @@ python scripts/prepare_needham.py <dir>/dataset.json                            
 python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl --out output/qwen3.8-27b/acts/dolly+needham
 python train_probes.py output/qwen3.8-27b/acts/dolly+needham --holdout-family 'needham:agent:*' --name hold-agent
 
+# + aware-bench and WildChat (see below; run after prepare_needham, which both dedup against)
+python scripts/prepare_awarebench.py                                              # -> data/awarebench_rows.jsonl
+python scripts/prepare_wildchat.py                                                # -> data/wildchat_rows.jsonl
+python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl data/awarebench_rows.jsonl \
+    data/wildchat_rows.jsonl --out output/qwen3.8-27b/acts/dolly+needham+awarebench+wildchat
+
 python extract.py --model qwen3.8-27b --data data/mix-main.jsonl                  # score-only rows
 python score.py output/qwen3.8-27b/trained/<name> output/qwen3.8-27b/acts/mix-main
 ```
@@ -241,6 +256,34 @@ agentic 5.7k eval / 11k deploy (up to 85k before truncation). Within Needham, le
   transfers to the other.
 - Extraction cost is set by the agentic transcripts (~4M tokens after truncation, vs ~0.1M for Dolly); with
   `--max-batch-tokens 16384` they run one per batch.
+
+### aware-bench and WildChat data
+
+[el7982/aware-bench](https://huggingface.co/datasets/el7982/aware-bench) (EvalDetectBench; CC BY-NC-SA, contains
+GAIA level 2, keep rows out of git; not the score-only EvalAwareBench): `scripts/prepare_awarebench.py` takes the
+Qwen 3.5 generator's `all.json` (41 eval benchmarks + 13 deployment sources) and converts it like Needham's.
+- Tool definitions are dropped by default: only eval trajectories carry them, so they would give the label away.
+- Dropped: `mask` (in the data mix), `hackaprompt_dataset` (eval here, deploy in Needham), and any transcript whose
+  system prompt + first user message is already in Needham's rows (~260, many sources are shared).
+- Benchmarks also in Needham get Needham's group (`GROUP_ALIASES` for renamed ones), so a group split never puts
+  one benchmark on both sides. Family `awarebench:{chat|agent}:<category>`, source `awarebench_chat` / `_agent`.
+
+[allenai/WildChat](https://huggingface.co/datasets/allenai/WildChat) (ODC-BY): real ChatGPT conversations, deploy
+only. `scripts/prepare_wildchat.py` filters one shard heavily (English, not toxic/redacted/flagged, at most 4 turns,
+no repeated templates or bots, no jailbreak or test talk, nothing already in Needham/aware-bench) and samples 100
+rows: enough to bring chat deploy level with chat eval. Group `wildchat` (one dataset), source `wildchat`.
+
+| source | eval | deploy | median tokens eval / deploy |
+|---|---|---|---|
+| Needham chat | 287 | 213 | 93 / 148 |
+| aware-bench chat | 150 | 124 | 204 / 680 |
+| WildChat | – | 100 | – / 203 |
+| Needham agentic | 250 | 226 | 5.4k / 7.9k |
+| aware-bench agentic | 77 | 136 | 13k / 2.8k |
+
+aware-bench's agentic eval transcripts are longer than its deploy ones, the opposite of Needham, so length alone
+no longer points one way. `--balance source` gives both labels equal weight and splits each label's weight equally
+over its sources, so deploy-only WildChat does not tip the balance. Together they add ~2M tokens to extraction.
 
 ## Output format
 
@@ -279,6 +322,8 @@ scripts/analyze.py         # Per-layer summary + per-factor effects
 scripts/analyze_validation.py  # Sanity-check scores per cue category and placement
 scripts/add_ensemble.py   # Add linear-ensemble scores to projections from an export.pt
 scripts/prepare_needham.py # Needham et al. transcripts -> labeled rows
+scripts/prepare_awarebench.py  # aware-bench (EvalDetectBench) trajectories -> labeled rows
+scripts/prepare_wildchat.py    # Filtered WildChat sample -> deploy rows
 scripts/runpod_*.sh        # RunPod setup / run
 scripts/download_artifacts.sh
 datasets/contrastive_dataset_dolly.json

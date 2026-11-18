@@ -8,8 +8,8 @@ MLPEnsemble (see src/classifiers.py):
 Splits are by group (src/rows.py), so the eval and deploy versions of a stem never straddle train and val.
 --holdout-family removes whole families from training and reports on them separately (leave-family-out);
 shell-style patterns work, e.g. 'needham:agent:*'.
---balance (default "source") weights the loss so every (source, label) cell counts the same, e.g. Dolly's 1224
-short paired rows vs Needham's chat and agentic transcripts.
+--balance (default "source") weights the loss so both labels count the same and, within a label, every source counts
+the same, e.g. Dolly's 1224 short paired rows vs Needham's chat and agentic transcripts vs deploy-only WildChat.
 length_baseline: logistic regression on log(prompt tokens) alone, trained on the same rows and weights. A probe that
 does not clearly beat it on a split may be reading prompt length rather than evaluation cues.
 Reported overall, per source and per family (families need both labels).
@@ -60,7 +60,7 @@ def main():
     parser.add_argument("--holdout-family", nargs="*", default=[],
                         help="Families excluded from training (shell-style patterns allowed)")
     parser.add_argument("--balance", choices=["source", "label", "none"], default="source",
-                        help="Loss weights: equal total per (source, label), per label, or none")
+                        help="Loss weights: equal per label and per source within it, per label, or none")
     parser.add_argument("--val-frac", type=float, default=0.15)
     parser.add_argument("--epochs", type=int, default=None,
                         help="Default: at least 3 epochs and 2000 optimizer steps")

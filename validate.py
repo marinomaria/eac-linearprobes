@@ -19,12 +19,16 @@ Probes:
              linear_ensemble, mlp_ensemble) scores the cues, from one extraction at the union of their layers.
              Output: <trained dir>/validation.jsonl each, with one logit per probe ("projections": {probe: [logit]}).
   Both can be given in one call (one model load); --trained alone skips the direction probes.
+  --acts     instead of running the model: cue activations stored once with `extract.py --data cues` (same
+             cues, placements and stems as here), so any later --trained probes are scored offline in seconds.
 
 Usage:
     python validate.py --model qwen3.5-0.8b --n-stems 4     # quick local test
     python validate.py --model qwen3.8-27b --batch-size 16
     python validate.py --model qwen3.8-27b --probes output/qwen3.8-27b/probes.pt \
         --trained output/qwen3.8-27b/trained/all output/qwen3.8-27b/trained/hold-agent
+    python extract.py --model qwen3.8-27b --data cues                  # once, on a GPU
+    python validate.py --acts output/qwen3.8-27b/acts/cues --trained output/qwen3.8-27b/trained/all   # anywhere
 """
 import argparse
 import csv
@@ -35,7 +39,8 @@ import random
 import torch
 
 from run import CONTRASTIVE_DATASET, OUTPUT_DIR, SYSTEM_PROMPTS
-from src.activations import last_token_layers
+from src.activations import last_token_layers, layer_tensor
+from src.activations import load as load_acts
 from src.classifiers import load_trained, score_all
 from src.model import format_chat, get_device, load_model
 from src.probe import project_conversations
@@ -61,9 +66,81 @@ def conversations(text, placement, stems):
     return [[{"role": "user", "content": text}]] if text else []
 
 
+def cue_groups(prompts=VALIDATION_PROMPTS, n_stems=20):
+    """Every (cue, placement) as a group of conversations (one per stem; one for "user"), flattened so a single
+    batched pass covers all of them. Returns (groups, convs), groups[i] = (item, placement, indices into convs)."""
+    items = [i for path in prompts for i in read_prompts(path)]
+    with open(SYSTEM_PROMPTS) as f:
+        for v in json.load(f):
+            items.append({"category": "anchor_eval", "expected": "eval", "text": v["eval"], "set": "anchor"})
+            items.append({"category": "anchor_deploy", "expected": "deploy", "text": v["deploy"], "set": "anchor"})
+    with open(CONTRASTIVE_DATASET) as f:
+        stems = [row["stem"].strip() for row in json.load(f)]
+    stems = random.Random(0).sample(stems, min(n_stems, len(stems)))
+    convs, groups = [], []
+    for item in items:
+        for placement in ("system", "prefix", "user"):
+            c = conversations(item["text"], placement, stems)
+            if c:
+                groups.append((item, placement, list(range(len(convs), len(convs) + len(c)))))
+                convs += c
+    return groups, convs
+
+
+def cue_rows(n_stems=20, prompts=VALIDATION_PROMPTS):
+    """The cue conversations as unlabeled rows (src/rows.py), for extract.py --data cues: their activations are
+    stored once and any trained probe is scored on them offline (validate.py --acts). meta.g indexes the
+    (cue, placement) group whose stems are averaged."""
+    groups, convs = cue_groups(prompts, n_stems)
+    rows = []
+    for g, (item, placement, sl) in enumerate(groups):
+        for k, i in enumerate(sl):
+            rows.append({"id": f"cue:{g}:{k}", "messages": convs[i], "label": None, "group": f"cue:{g}",
+                         "family": f"cues:{item['set']}", "source": "cues",
+                         "meta": {**item, "placement": placement, "g": g}})
+    return rows
+
+
+def write_validation(path, groups, per_group):
+    """per_group(indices) -> {probe: list}, averaged over the stems of one (cue, placement); one line each."""
+    with open(path, "w") as f:
+        for item, placement, idx in groups:
+            f.write(json.dumps({**item, "placement": placement, "n": len(idx), "projections": per_group(idx)}) + "\n")
+    print(f"{len(groups)} rows saved to {path}")
+
+
+def from_acts(parser, args):
+    """--acts: score --trained probes on stored cue activations, without loading the model."""
+    acts, rows, info = load_acts(args.acts)
+    if not rows or rows[0]["source"] != "cues":
+        parser.error(f"{args.acts} does not hold cue activations (extract.py --data cues)")
+    if args.probes:
+        parser.error("--acts scores --trained probes only (direction probes need every layer)")
+    by_g = {}
+    for i, r in enumerate(rows):
+        by_g.setdefault(r["meta"]["g"], []).append(i)
+    groups = []
+    for g in sorted(by_g):
+        meta = dict(rows[by_g[g][0]]["meta"])
+        placement = meta.pop("placement")
+        meta.pop("g")
+        groups.append((meta, placement, by_g[g]))
+    for d in args.trained:
+        saved, ps = load_trained(d)
+        layers = saved["info"]["layers"]
+        if saved["info"]["model"] != info["model"] or not set(layers) <= set(info["layers"]):
+            parser.error(f"{d} ({saved['info']['model']}, layers {layers}) does not match the activations "
+                         f"({info['model']}, layers {info['layers']})")
+        scores = score_all(saved, ps, lambda layer: layer_tensor(acts, info["layers"].index(layer)), get_device())
+        write_validation(os.path.join(d, "validation.jsonl"), groups,
+                         lambda idx, scores=scores: {k: [float(v[idx].mean())] for k, v in scores.items()})
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", required=True, help="Alias from src/model.py:MODELS or HF repo id")
+    parser.add_argument("--model", default=None, help="Alias from src/model.py:MODELS or HF repo id")
+    parser.add_argument("--acts", default=None,
+                        help="Cue activations from extract.py --data cues: score --trained offline, no model")
     parser.add_argument("--probes", default=None,
                         help="Direction file, run.py's probes.pt or an export.pt (default: output/<model>/probes.pt)")
     parser.add_argument("--trained", nargs="*", default=[], help="train_probes.py output directories")
@@ -72,6 +149,12 @@ def main():
     parser.add_argument("--n-stems", type=int, default=20, help="Stems averaged over in system/prefix placements")
     parser.add_argument("--batch-size", type=int, default=8)
     args = parser.parse_args()
+    if args.acts:
+        if not args.trained:
+            parser.error("--acts needs --trained")
+        return from_acts(parser, args)
+    if not args.model:
+        parser.error("--model is required (unless --acts)")
 
     out_dir = os.path.join(OUTPUT_DIR, args.model.replace("/", "_"))
     probes = None
@@ -85,41 +168,17 @@ def main():
         if saved["info"]["model"] != args.model:
             parser.error(f"{d} was trained on {saved['info']['model']} activations, not {args.model}")
 
-    items = [i for path in args.prompts for i in read_prompts(path)]
-    with open(SYSTEM_PROMPTS) as f:
-        for v in json.load(f):
-            items.append({"category": "anchor_eval", "expected": "eval", "text": v["eval"], "set": "anchor"})
-            items.append({"category": "anchor_deploy", "expected": "deploy", "text": v["deploy"], "set": "anchor"})
-    with open(CONTRASTIVE_DATASET) as f:
-        stems = [row["stem"].strip() for row in json.load(f)]
-    stems = random.Random(0).sample(stems, min(args.n_stems, len(stems)))
-
-    # Flatten every (item, placement, stem) into one list so a single batched pass covers all of them.
-    convs, groups = [], []  # groups[i] = (item, placement, slice into convs)
-    for item in items:
-        for placement in ("system", "prefix", "user"):
-            c = conversations(item["text"], placement, stems)
-            if c:
-                groups.append((item, placement, slice(len(convs), len(convs) + len(c))))
-                convs += c
+    groups, convs = cue_groups(args.prompts, args.n_stems)
 
     model, tokenizer, n_layers = load_model(args.model)
-    print(f"{len(items)} cues x placements = {len(convs)} conversations")
-
-    def write(path, per_row):
-        """per_row(slice) -> {probe: list}, averaged over the stems of one (cue, placement)."""
-        with open(path, "w") as f:
-            for item, placement, sl in groups:
-                f.write(json.dumps({**item, "placement": placement, "n": sl.stop - sl.start,
-                                    "projections": per_row(sl)}) + "\n")
-        print(f"{len(groups)} rows saved to {path}")
+    print(f"{len(groups)} cues x placements = {len(convs)} conversations")
 
     if probes is not None:
         names = list(probes)
         stacked = torch.stack([probes[n] for n in names])
         proj = project_conversations(model, tokenizer, stacked, convs, n_layers, args.batch_size)
-        write(args.out or os.path.join(out_dir, "validation.jsonl"),
-              lambda sl: dict(zip(names, proj[sl].mean(dim=0).tolist(), strict=True)))  # [n_variants, n_layers]
+        write_validation(args.out or os.path.join(out_dir, "validation.jsonl"), groups,  # [n_variants, n_layers]
+                         lambda idx: dict(zip(names, proj[idx].mean(dim=0).tolist(), strict=True)))
 
     if trained:
         layers = sorted({layer for saved, _ in trained.values() for layer in saved["info"]["layers"]})
@@ -127,8 +186,8 @@ def main():
                                  args.batch_size)
         for d, (saved, ps) in trained.items():
             scores = score_all(saved, ps, lambda layer: acts[:, layers.index(layer)].float(), get_device())
-            write(os.path.join(d, "validation.jsonl"),
-                  lambda sl, scores=scores: {k: [float(v[sl].mean())] for k, v in scores.items()})
+            write_validation(os.path.join(d, "validation.jsonl"), groups,
+                             lambda idx, scores=scores: {k: [float(v[idx].mean())] for k, v in scores.items()})
 
 
 if __name__ == "__main__":

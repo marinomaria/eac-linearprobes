@@ -7,6 +7,7 @@ Choices not specified by the paper (adjust freely): features are standardized pe
 mean/std; the ensemble averages logits; the MLP has one hidden layer of 256 units; cosine learning-rate
 decay over a fixed number of epochs.
 """
+import collections
 import math
 import os
 
@@ -108,15 +109,21 @@ def score_all(saved, probes, layer_x, device="cpu", chunk=4096):
 
 
 def balance_weights(y, sources, mode="source"):
-    """Per-row weights giving every (source, label) cell ("source") or every label ("label") the same total
-    weight; "none": all ones. Mean 1."""
+    """Per-row weights. "label": every label gets the same total weight. "source": every label gets the same total
+    weight, split equally over the sources that have that label, so a one-label source (e.g. WildChat, deploy only)
+    does not tip the label balance; with every source having both labels this is equal weight per (source, label)
+    cell. "none": all ones. Mean 1."""
     if mode == "none":
         return np.ones(len(y))
     keys = list(zip(sources, y, strict=True)) if mode == "source" else list(y)
     counts = {}
     for k in keys:
         counts[k] = counts.get(k, 0) + 1
-    w = np.array([1 / counts[k] for k in keys])
+    if mode == "source":
+        n_sources = collections.Counter(label for _, label in counts)
+        w = np.array([1 / (counts[k] * n_sources[k[1]]) for k in keys])
+    else:
+        w = np.array([1 / counts[k] for k in keys])
     return w / w.mean()
 
 

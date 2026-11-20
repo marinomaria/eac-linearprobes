@@ -21,6 +21,7 @@ Keep the rows file out of git (data/ is gitignored).
 Usage:
     python scripts/prepare_verbalized.py --out data/verbalized_rows.jsonl
 """
+
 import argparse
 import collections
 import json
@@ -55,6 +56,7 @@ def main():
     args = parser.parse_args()
 
     import pandas as pd
+
     df = pd.read_csv(args.csv)
     df["family"] = df["family"].where(df["family"].notna(), None)
 
@@ -67,13 +69,18 @@ def main():
     main_items = {VARIANT.sub("", r["id"]).removeprefix("harmbench-") for r in main_rows}
     main_items |= {(r.get("meta") or {}).get("family") for r in main_rows}
     main_msgs = {json.dumps(r["messages"], sort_keys=True) for r in main_rows}
-    leaks = [r.id for r in df.itertuples()
-             if r.id in main_ids or item(r.id, r.dataset, r.family) in main_items
-             or json.dumps(json.loads(r.messages), sort_keys=True) in main_msgs]
+    leaks = [
+        r.id
+        for r in df.itertuples()
+        if r.id in main_ids
+        or item(r.id, r.dataset, r.family) in main_items
+        or json.dumps(json.loads(r.messages), sort_keys=True) in main_msgs
+    ]
     if leaks:
         sys.exit(f"{len(leaks)} rows overlap mix-main, e.g. {leaks[:5]}")
 
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(MODELS.get(args.model, args.model))
     rows = []
     for r in df.itertuples():
@@ -82,25 +89,42 @@ def main():
             msgs.pop()
         msgs, n, dropped = fit(tokenizer, msgs, None, args.max_tokens)
         stratum = r.stratum.split("|")[0]
-        rows.append({
-            "id": f"verbalized:{r.id}", "messages": msgs, "tools": None,
-            "label": "eval" if r.voicing_rate >= args.threshold else "deploy",
-            "group": f"verbalized:{item(r.id, r.dataset, r.family)}",
-            "family": f"verbalized:{r.dataset}:{stratum}", "source": "verbalized",
-            "meta": {"dataset": r.dataset, "stratum": r.stratum, "condition": None if pd.isna(r.condition) else r.condition,
-                     "voicing_rate": float(r.voicing_rate), "n_voiced": int(r.n_voiced),
-                     "n_rollouts": int(r.n_rollouts), "n_voiced_evaluator": int(r.n_voiced_evaluator),
-                     "n_voiced_user": int(r.n_voiced_user), "n_scenario_recognition": int(r.n_scenario_recognition),
-                     "n_tokens": n, "n_messages": len(msgs), "truncated": dropped > 0, "dropped_messages": dropped},
-        })
+        rows.append(
+            {
+                "id": f"verbalized:{r.id}",
+                "messages": msgs,
+                "tools": None,
+                "label": "eval" if r.voicing_rate >= args.threshold else "deploy",
+                "group": f"verbalized:{item(r.id, r.dataset, r.family)}",
+                "family": f"verbalized:{r.dataset}:{stratum}",
+                "source": "verbalized",
+                "meta": {
+                    "dataset": r.dataset,
+                    "stratum": r.stratum,
+                    "condition": None if pd.isna(r.condition) else r.condition,
+                    "voicing_rate": float(r.voicing_rate),
+                    "n_voiced": int(r.n_voiced),
+                    "n_rollouts": int(r.n_rollouts),
+                    "n_voiced_evaluator": int(r.n_voiced_evaluator),
+                    "n_voiced_user": int(r.n_voiced_user),
+                    "n_scenario_recognition": int(r.n_scenario_recognition),
+                    "n_tokens": n,
+                    "n_messages": len(msgs),
+                    "truncated": dropped > 0,
+                    "dropped_messages": dropped,
+                },
+            }
+        )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
     counts = collections.Counter((r["family"], r["label"]) for r in rows)
-    print(f"{len(rows)} rows, {len({r['group'] for r in rows})} groups, "
-          f"{sum(r['meta']['truncated'] for r in rows)} truncated -> {args.out}")
+    print(
+        f"{len(rows)} rows, {len({r['group'] for r in rows})} groups, "
+        f"{sum(r['meta']['truncated'] for r in rows)} truncated -> {args.out}"
+    )
     for fam in sorted({k[0] for k in counts}):
         print(f"  {fam}: eval {counts[(fam, 'eval')]}, deploy {counts[(fam, 'deploy')]}")
 

@@ -14,6 +14,7 @@ Each cue ("evaluation", "chicken", "This is not a test.", ...) is shown in three
 An empty cue (category "none") is the no-cue baseline. The rows are unlabeled; meta carries the cue, its
 placement and g, the index of its (cue, placement) group, over whose stems report.py averages the scores.
 """
+
 import csv
 import json
 import os
@@ -50,8 +51,17 @@ def cue_rows(n_stems=20, files=CUE_FILES):
         for placement in PLACEMENTS:
             convs = conversations(item["text"], placement, stems)
             for k, messages in enumerate(convs):
-                rows.append({"id": f"cue:{g}:{k}", "messages": messages, "label": None, "group": f"cue:{g}",
-                             "family": f"cues:{item['set']}", "source": "cues", "tools": None,
-                             "meta": {**item, "placement": placement, "g": g}})
+                rows.append(
+                    {
+                        "id": f"cue:{g}:{k}",
+                        "messages": messages,
+                        "label": None,
+                        "group": f"cue:{g}",
+                        "family": f"cues:{item['set']}",
+                        "source": "cues",
+                        "tools": None,
+                        "meta": {**item, "placement": placement, "g": g},
+                    }
+                )
             g += bool(convs)
     return rows

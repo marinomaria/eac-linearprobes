@@ -13,6 +13,7 @@ output_hidden_states: long agentic transcripts fit.
 bf16 rather than fp16: residual streams of large models carry activations beyond fp16's range.
 Size: n_rows x n_layers_kept x d_model x 2 bytes (150k rows, 6 layers, d=5120: ~9 GB).
 """
+
 import json
 import os
 
@@ -67,6 +68,7 @@ def _last_token(model, tokenizer, prompts, layers, blocks):
             got[layer] = h[:, -1, :].to(torch.bfloat16).cpu()
             if len(got) == len(layers):
                 raise _Stop
+
         return fn
 
     handles = [blocks[layer].register_forward_pre_hook(hook(layer), with_kwargs=True) for layer in layers]
@@ -90,8 +92,9 @@ def extract(model, tokenizer, rows, layers, n_layers, out_dir, model_name, batch
     order = sorted(range(len(rows)), key=lambda i: lengths[i])
     d_model = model.config.get_text_config().hidden_size
 
-    acts = np.lib.format.open_memmap(os.path.join(out_dir, "acts.npy"), mode="w+", dtype=np.uint16,
-                                     shape=(len(rows), len(layers), d_model))
+    acts = np.lib.format.open_memmap(
+        os.path.join(out_dir, "acts.npy"), mode="w+", dtype=np.uint16, shape=(len(rows), len(layers), d_model)
+    )
     for idx in tqdm(list(token_budget_batches(order, lengths, batch_size, max_batch_tokens)), desc="Extracting"):
         a = _last_token(model, tokenizer, [formatted[i] for i in idx], layers, blocks)
         acts[idx] = a.view(torch.uint16).numpy()

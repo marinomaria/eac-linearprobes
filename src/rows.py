@@ -14,6 +14,7 @@ One JSON object per line:
   train_probes.py --balance weights sources equally, so a large or long-prompt dataset does not dominate the probe.
 - tools: optional OpenAI-style tool definitions, rendered by the chat template (agentic transcripts).
 """
+
 import hashlib
 import json
 import random
@@ -53,10 +54,18 @@ def dolly_rows(n_stems=None):
     for v in variants:
         for i, stem in enumerate(dolly_stems(n_stems)):
             for label in ("eval", "deploy"):
-                rows.append({"id": f"dolly:{i}:{v['name']}:{label}", "label": label, "group": f"dolly:{i}",
-                             "family": f"sysprompt:{v['name']}", "source": "dolly", "meta": {}, "tools": None,
-                             "messages": [{"role": "system", "content": v[label]},
-                                          {"role": "user", "content": stem}]})
+                rows.append(
+                    {
+                        "id": f"dolly:{i}:{v['name']}:{label}",
+                        "label": label,
+                        "group": f"dolly:{i}",
+                        "family": f"sysprompt:{v['name']}",
+                        "source": "dolly",
+                        "meta": {},
+                        "tools": None,
+                        "messages": [{"role": "system", "content": v[label]}, {"role": "user", "content": stem}],
+                    }
+                )
     return rows
 
 

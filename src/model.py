@@ -2,6 +2,7 @@
 Model loading and chat formatting with plain HuggingFace transformers (TransformerLens does not support
 Qwen3.8's qwen3_5 hybrid linear-attention architecture).
 """
+
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -51,6 +52,6 @@ def format_chat(tokenizer, messages, tools=None):
     (it appends an empty think block), so without the flag the two models are read at different tokens.
     With it, every prompt ends in `<think>\\n`. `tools`: OpenAI-style tool definitions, rendered by the template.
     """
-    return tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, add_generation_prompt=True,
-                                         enable_thinking=True)
-
+    return tokenizer.apply_chat_template(
+        messages, tools=tools, tokenize=False, add_generation_prompt=True, enable_thinking=True
+    )

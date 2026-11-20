@@ -27,6 +27,7 @@ Usage:
     python report.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/trained/verbalized \
         --holdout output/qwen3.8-27b/trained/hold-*
 """
+
 import argparse
 import glob
 import json
@@ -64,8 +65,7 @@ def run_args(run):
     saved = torch.load(os.path.join(run, "probes.pt"), weights_only=False)
     acts = saved["args"]["acts"]
     acts = [acts] if isinstance(acts, str) else acts
-    return {"acts": [os.path.normpath(os.path.abspath(a)) for a in acts],
-            "train_sources": saved.get("train_sources")}
+    return {"acts": [os.path.normpath(os.path.abspath(a)) for a in acts], "train_sources": saved.get("train_sources")}
 
 
 def heldout_by_source(run, holdouts):
@@ -140,15 +140,20 @@ def main():
     with pd.option_context("display.width", 300, "display.max_columns", None):
         print(table.round(3).to_string())
     good = table.index[table["good"]].tolist()
-    print(f"\nGood (val and ZT AUROC >= {args.bar} in every placement; ZT is a subset of val): {good or 'none'}"
-          f"\nSaved {out}")
+    print(
+        f"\nGood (val and ZT AUROC >= {args.bar} in every placement; ZT is a subset of val): {good or 'none'}"
+        f"\nSaved {out}"
+    )
 
     by_run = {}
     for g in good:
         run, probe = owner[g]
         by_run.setdefault(run, []).append((g, probe))
-    missing = [os.path.join(r, f"scores_{args.mix}.jsonl") for r in by_run
-               if not os.path.exists(os.path.join(r, f"scores_{args.mix}.jsonl"))]
+    missing = [
+        os.path.join(r, f"scores_{args.mix}.jsonl")
+        for r in by_run
+        if not os.path.exists(os.path.join(r, f"scores_{args.mix}.jsonl"))
+    ]
     if not good or missing:
         print(f"No {args.mix} scores written" + (f": run score.py for {missing}" if missing else ""))
         return
@@ -157,7 +162,9 @@ def main():
         with open(os.path.join(run, f"scores_{args.mix}.jsonl")) as f:
             for line in f:
                 r = json.loads(line)
-                row = merged.setdefault(r["id"], {"id": r["id"], "source": r["source"], "meta": r["meta"], "scores": {}})
+                row = merged.setdefault(
+                    r["id"], {"id": r["id"], "source": r["source"], "meta": r["meta"], "scores": {}}
+                )
                 row["scores"].update({g: r["scores"][p] for g, p in probes})
     mix_out = os.path.join(args.runs[0], f"{args.mix}_good.jsonl")
     with open(mix_out, "w") as f:

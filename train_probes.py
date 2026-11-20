@@ -25,6 +25,7 @@ Usage:
     python train_probes.py output/qwen3.8-27b/acts/train --holdout-family 'needham:agent:*' --name hold-agent
     python train_probes.py output/qwen3.8-27b/acts/verbalized --name verbalized
 """
+
 import argparse
 import fnmatch
 import os
@@ -44,13 +45,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("acts", nargs="+", help="Activation directories written by extract.py (rows concatenated)")
     parser.add_argument("--name", default=None, help="Output name (default: the first activation directory's name)")
-    parser.add_argument("--holdout-family", nargs="*", default=[],
-                        help="Families excluded from training (shell-style patterns allowed)")
-    parser.add_argument("--balance", choices=["source", "label", "none"], default="source",
-                        help="Weights: equal per label and per source within it, per label, or none")
+    parser.add_argument(
+        "--holdout-family", nargs="*", default=[], help="Families excluded from training (shell-style patterns allowed)"
+    )
+    parser.add_argument(
+        "--balance",
+        choices=["source", "label", "none"],
+        default="source",
+        help="Weights: equal per label and per source within it, per label, or none",
+    )
     parser.add_argument("--val-frac", type=float, default=0.15)
-    parser.add_argument("--epochs", type=int, default=None,
-                        help="Default: at least 3 epochs and 2000 optimizer steps")
+    parser.add_argument("--epochs", type=int, default=None, help="Default: at least 3 epochs and 2000 optimizer steps")
     parser.add_argument("--mlp-hidden", type=int, default=256)
     parser.add_argument("--n-boot", type=int, default=1000)
     parser.add_argument("--seed", type=int, default=0)
@@ -68,10 +73,18 @@ def main():
     val = labeled & ~heldout & df["group"].map(lambda g: in_val(g, args.val_frac, args.seed)).to_numpy()
     train = labeled & ~heldout & ~val
     y = df["label"].map(LABELS).to_numpy(dtype=float)
-    print(f"train {train.sum()} (eval {int(y[train].sum())}), val {val.sum()}, heldout {heldout.sum()}; "
-          f"layers {info['layers']}")
-    print(df[labeled].assign(split=np.select([train[labeled], val[labeled]], ["train", "val"], "heldout"))
-          .groupby(["split", "source", "label"]).size().unstack(fill_value=0).to_string())
+    print(
+        f"train {train.sum()} (eval {int(y[train].sum())}), val {val.sum()}, heldout {heldout.sum()}; "
+        f"layers {info['layers']}"
+    )
+    print(
+        df[labeled]
+        .assign(split=np.select([train[labeled], val[labeled]], ["train", "val"], "heldout"))
+        .groupby(["split", "source", "label"])
+        .size()
+        .unstack(fill_value=0)
+        .to_string()
+    )
     for split, m in (("train", train), ("val", val)):
         if len(set(y[m])) < 2:
             parser.error(f"{split} split has a single class; check labels / --val-frac")
@@ -88,17 +101,24 @@ def main():
         x = layer_tensor(acts, j)[train_idx]
         probes["meandiff"].append(mean_diff_probe(x, y_train, w_train_t))
         for kind, hidden in (("linear", 0), ("mlp", args.mlp_hidden)):
-            probe, loss = train_layer_probe(x, y_train, hidden=hidden, epochs=args.epochs, seed=args.seed,
-                                            device=device, weights=w_train_t)
+            probe, loss = train_layer_probe(
+                x, y_train, hidden=hidden, epochs=args.epochs, seed=args.seed, device=device, weights=w_train_t
+            )
             probes[kind].append(probe)
             losses[kind].append(loss)
             print(f"  layer {layer:3d} {kind:6s} train BCE {loss:.4f}")
     kept = {kind: kept_layers(v) for kind, v in losses.items()}
     for kind, k in kept.items():
         print(f"{kind}_ensemble: layers {[info['layers'][j] for j in k]}")
-    saved = {"info": info, "kept": kept, "losses": losses, "mlp_hidden": args.mlp_hidden, "args": vars(args),
-             "train_sources": sorted(df["source"][train].unique()),
-             "state": {k: [p.state_dict() for p in v] for k, v in probes.items()}}
+    saved = {
+        "info": info,
+        "kept": kept,
+        "losses": losses,
+        "mlp_hidden": args.mlp_hidden,
+        "args": vars(args),
+        "train_sources": sorted(df["source"][train].unique()),
+        "state": {k: [p.state_dict() for p in v] for k, v in probes.items()},
+    }
 
     scores = score_all(saved, probes, lambda layer: layer_tensor(acts, info["layers"].index(layer)), device)
     log_len = np.log(df["n_tokens"].to_numpy(dtype=float))[:, None]
@@ -117,12 +137,21 @@ def main():
             if len(set(y[mm])) < 2:
                 continue
             for name, s in scores.items():
-                report.append({"split": split, "subset": subset, "probe": name,
-                               **metrics(y[mm], s[mm], df["group"][mm], args.n_boot, args.seed)})
+                report.append(
+                    {
+                        "split": split,
+                        "subset": subset,
+                        "probe": name,
+                        **metrics(y[mm], s[mm], df["group"][mm], args.n_boot, args.seed),
+                    }
+                )
     report = pd.DataFrame(report)
 
-    out_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(args.acts[0]))), "trained",
-                           args.name or os.path.basename(os.path.normpath(args.acts[0])))
+    out_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(args.acts[0]))),
+        "trained",
+        args.name or os.path.basename(os.path.normpath(args.acts[0])),
+    )
     os.makedirs(out_dir, exist_ok=True)
     report.to_csv(os.path.join(out_dir, "report.csv"), index=False)
     torch.save(saved, os.path.join(out_dir, "probes.pt"))

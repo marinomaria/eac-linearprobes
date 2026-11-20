@@ -19,6 +19,7 @@ group = "wildchat" (one source dataset, as Needham groups by dataset); family = 
 Usage:
     python scripts/prepare_wildchat.py --out data/wildchat_rows.jsonl
 """
+
 import argparse
 import collections
 import json
@@ -38,7 +39,8 @@ REPO = "allenai/WildChat"
 JAILBREAK = re.compile(
     r"jailbr|developer mode|\bDAN\b|do anything now|ignore (all |the |any )?(previous|prior|above) instructions|"
     r"(being|are you|you are) (tested|evaluated|benchmarked)|\bbenchmark|\bevaluation\b|\btest(ing)? you\b",
-    re.IGNORECASE)
+    re.IGNORECASE,
+)
 
 
 def main():
@@ -46,8 +48,12 @@ def main():
     parser.add_argument("--n", type=int, default=100, help="Rows to sample after filtering")
     parser.add_argument("--shards", type=int, nargs="+", default=[0], help="Parquet shards 0-5 (~88k each)")
     parser.add_argument("--max-turns", type=int, default=4)
-    parser.add_argument("--exclude", nargs="*", default=["data/needham_rows.jsonl", "data/awarebench_rows.jsonl"],
-                        help="Rows files whose tasks must not reappear")
+    parser.add_argument(
+        "--exclude",
+        nargs="*",
+        default=["data/needham_rows.jsonl", "data/awarebench_rows.jsonl"],
+        help="Rows files whose tasks must not reappear",
+    )
     parser.add_argument("--out", default="data/wildchat_rows.jsonl")
     parser.add_argument("--model", default="qwen3.8-27b", help="Tokenizer used for --max-tokens")
     parser.add_argument("--max-tokens", type=int, default=16384)
@@ -56,8 +62,14 @@ def main():
 
     import pandas as pd
     from huggingface_hub import hf_hub_download
-    df = pd.concat([pd.read_parquet(hf_hub_download(REPO, f"data/train-{i:05d}-of-00006.parquet",
-                                                    repo_type="dataset")) for i in args.shards], ignore_index=True)
+
+    df = pd.concat(
+        [
+            pd.read_parquet(hf_hub_download(REPO, f"data/train-{i:05d}-of-00006.parquet", repo_type="dataset"))
+            for i in args.shards
+        ],
+        ignore_index=True,
+    )
     n_total = len(df)
 
     seen = set()
@@ -82,14 +94,17 @@ def main():
     keep(f"<= {args.max_turns} turns", df.turn <= args.max_turns)
     keep("first message 20-4000 chars", first.str.len().between(20, 4000))
     keep("unique 60-char prefix", first.str[:60].str.lower().map(prefix_counts) == 1)
-    keep("no jailbreak/test talk", ~df.conversation.map(
-        lambda c: any(JAILBREAK.search(m["content"]) for m in c if m["role"] == "user")))
+    keep(
+        "no jailbreak/test talk",
+        ~df.conversation.map(lambda c: any(JAILBREAK.search(m["content"]) for m in c if m["role"] == "user")),
+    )
     keep("not in --exclude rows", ~first.str[:2000].isin(seen))
     if len(df) < args.n:
         sys.exit(f"only {len(df)} conversations pass the filters; load more --shards")
     picked = random.Random(args.seed).sample(list(df.index), args.n)
 
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(MODELS.get(args.model, args.model))
     rows = []
     for i in picked:
@@ -98,12 +113,27 @@ def main():
         while msgs and msgs[-1]["role"] == "assistant":
             msgs.pop()
         msgs, n, dropped = fit(tokenizer, msgs, None, args.max_tokens)
-        rows.append({
-            "id": f"wildchat:{r.conversation_id}", "messages": msgs, "tools": None, "label": "deploy",
-            "group": "wildchat", "family": "wildchat:chat", "source": "wildchat",
-            "meta": {"category": "wildchat", "model": r.model, "timestamp": str(r.timestamp), "turn": int(r.turn),
-                     "n_tokens": n, "n_messages": len(msgs), "truncated": dropped > 0, "dropped_messages": dropped},
-        })
+        rows.append(
+            {
+                "id": f"wildchat:{r.conversation_id}",
+                "messages": msgs,
+                "tools": None,
+                "label": "deploy",
+                "group": "wildchat",
+                "family": "wildchat:chat",
+                "source": "wildchat",
+                "meta": {
+                    "category": "wildchat",
+                    "model": r.model,
+                    "timestamp": str(r.timestamp),
+                    "turn": int(r.turn),
+                    "n_tokens": n,
+                    "n_messages": len(msgs),
+                    "truncated": dropped > 0,
+                    "dropped_messages": dropped,
+                },
+            }
+        )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
@@ -112,7 +142,9 @@ def main():
     print(f"{n_total} conversations in shards {args.shards}; after each filter:")
     for name, n in steps.items():
         print(f"  {name}: {n}")
-    print(f"{len(rows)} sampled -> {args.out}; turns {dict(sorted(collections.Counter(r['meta']['turn'] for r in rows).items()))}")
+    print(
+        f"{len(rows)} sampled -> {args.out}; turns {dict(sorted(collections.Counter(r['meta']['turn'] for r in rows).items()))}"
+    )
 
 
 if __name__ == "__main__":

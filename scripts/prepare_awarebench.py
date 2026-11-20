@@ -23,6 +23,7 @@ Keep the downloaded data and rows file out of git (data/ is gitignored).
 Usage:
     python scripts/prepare_awarebench.py --out data/awarebench_rows.jsonl
 """
+
 import argparse
 import collections
 import json
@@ -39,8 +40,13 @@ REPO = "el7982/aware-bench"
 # mask: MASK is part of the data mix (measurement set). hackaprompt_dataset: eval here, deploy in Needham.
 EXCLUDE = {"mask", "hackaprompt_dataset"}
 # aware-bench category -> Needham category of the same benchmark
-GROUP_ALIASES = {"swebench_verified_mini": "swebench", "wmdp_bio": "wmdp", "mmmlu": "mmlu",
-                 "hh_rlhf_redteam": "hh_rlhf", "gaia_level2": "gaia_runs"}
+GROUP_ALIASES = {
+    "swebench_verified_mini": "swebench",
+    "wmdp_bio": "wmdp",
+    "mmmlu": "mmlu",
+    "hh_rlhf_redteam": "hh_rlhf",
+    "gaia_level2": "gaia_runs",
+}
 
 
 def task_key(messages):
@@ -64,6 +70,7 @@ def main():
     path = args.file
     if path is None:
         from huggingface_hub import hf_hub_download
+
         path = hf_hub_download(REPO, f"collected_trajectories/{args.generator}/all.json", repo_type="dataset")
     with open(path) as f:
         samples = json.load(f)
@@ -79,6 +86,7 @@ def main():
         print(f"warning: {args.needham} not found; no Needham dedup or group aliasing")
 
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(MODELS.get(args.model, args.model))
 
     rows, skipped = [], collections.Counter()
@@ -102,22 +110,38 @@ def main():
         kind = "agent" if md.get("has_tools") or md.get("scaffold") else "chat"
         alias = GROUP_ALIASES.get(cat, cat)
         group = f"needham:{alias}" if alias in needham_cats else f"awarebench:{cat}"
-        rows.append({
-            "id": f"awarebench:{s['id']}", "messages": msgs, "tools": tools or None,
-            "label": "eval" if md["eval_category"] else "deploy",
-            "group": group, "family": f"awarebench:{kind}:{cat}", "source": f"awarebench_{kind}",
-            "meta": {"category": cat, "subcategory": md.get("subcategory"), "scaffold": md.get("scaffold"),
-                     "generator": args.generator, "generator_model": md.get("generator_model"),
-                     "n_tokens": n, "n_messages": len(msgs), "truncated": dropped > 0, "dropped_messages": dropped},
-        })
+        rows.append(
+            {
+                "id": f"awarebench:{s['id']}",
+                "messages": msgs,
+                "tools": tools or None,
+                "label": "eval" if md["eval_category"] else "deploy",
+                "group": group,
+                "family": f"awarebench:{kind}:{cat}",
+                "source": f"awarebench_{kind}",
+                "meta": {
+                    "category": cat,
+                    "subcategory": md.get("subcategory"),
+                    "scaffold": md.get("scaffold"),
+                    "generator": args.generator,
+                    "generator_model": md.get("generator_model"),
+                    "n_tokens": n,
+                    "n_messages": len(msgs),
+                    "truncated": dropped > 0,
+                    "dropped_messages": dropped,
+                },
+            }
+        )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
         for r in rows:
             f.write(json.dumps(r) + "\n")
     counts = collections.Counter((r["source"], r["label"]) for r in rows)
-    print(f"{len(rows)} rows -> {args.out}; truncated {sum(r['meta']['truncated'] for r in rows)}; "
-          f"{sum(r['group'].startswith('needham:') for r in rows)} share a Needham group")
+    print(
+        f"{len(rows)} rows -> {args.out}; truncated {sum(r['meta']['truncated'] for r in rows)}; "
+        f"{sum(r['group'].startswith('needham:') for r in rows)} share a Needham group"
+    )
     for k, v in sorted(counts.items()):
         print(f"  {k}: {v}")
     for k, v in sorted(skipped.items()):

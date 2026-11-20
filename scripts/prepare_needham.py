@@ -25,6 +25,7 @@ Conversion, so the model is read where it would start its next turn, as with the
 Usage:
     python scripts/prepare_needham.py <dir>/dataset.json --out data/needham_rows.jsonl
 """
+
 import argparse
 import collections
 import json
@@ -47,9 +48,14 @@ def convert_message(m, first):
         role = "user"
     out = {"role": role, "content": text(m["content"])}
     if m.get("tool_calls"):
-        out["tool_calls"] = [{"type": "function", "id": tc.get("id"),
-                              "function": {"name": tc["function"], "arguments": tc.get("arguments") or {}}}
-                             for tc in m["tool_calls"]]
+        out["tool_calls"] = [
+            {
+                "type": "function",
+                "id": tc.get("id"),
+                "function": {"name": tc["function"], "arguments": tc.get("arguments") or {}},
+            }
+            for tc in m["tool_calls"]
+        ]
     if role == "tool":
         out["tool_call_id"] = m.get("tool_call_id")
         if m.get("function"):
@@ -58,12 +64,22 @@ def convert_message(m, first):
 
 
 def convert_tools(tools):
-    return [{"type": "function", "function": {"name": t["name"], "description": t.get("description", ""),
-                                              "parameters": t.get("parameters", {})}} for t in tools or []]
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": t["name"],
+                "description": t.get("description", ""),
+                "parameters": t.get("parameters", {}),
+            },
+        }
+        for t in tools or []
+    ]
 
 
 def fit(tokenizer, messages, tools, max_tokens):
     """Drop whole messages after the leading system/user ones, oldest first, until the prompt fits."""
+
     def n_tokens(msgs):
         return len(tokenizer(format_chat(tokenizer, msgs, tools), add_special_tokens=False)["input_ids"])
 
@@ -71,7 +87,7 @@ def fit(tokenizer, messages, tools, max_tokens):
     n = n_tokens(messages)
     dropped = 0
     while n > max_tokens and len(messages) > head + 1:
-        rest = messages[head + 1:]
+        rest = messages[head + 1 :]
         # Never start the kept tail with a tool result whose call was dropped.
         while rest and rest[0]["role"] == "tool":
             rest = rest[1:]
@@ -90,6 +106,7 @@ def main():
     args = parser.parse_args()
 
     from transformers import AutoTokenizer
+
     tokenizer = AutoTokenizer.from_pretrained(MODELS.get(args.model, args.model))
 
     with open(args.dataset) as f:
@@ -103,20 +120,32 @@ def main():
         tools = convert_tools(md.get("tools"))
         msgs, n, dropped = fit(tokenizer, msgs, tools or None, args.max_tokens)
         kind = "agent" if md.get("scaffold") else "chat"
-        rows.append({
-            "id": f"needham:{s['id']}", "messages": msgs, "tools": tools or None,
-            "label": "eval" if md["eval_category"] else "deploy",
-            "group": f"needham:{md['category']}", "family": f"needham:{kind}:{md['category']}",
-            "source": f"needham_{kind}",
-            "meta": {"category": md["category"], "scaffold": md.get("scaffold"), "eval_type": md.get("eval_type"),
-                     "safety_category": md.get("safety_category"), "human": (md["eval_author1"] + md["eval_author2"]) / 2,
-                     "n_tokens": n, "n_messages": len(msgs), "truncated": dropped > 0, "dropped_messages": dropped},
-        })
+        rows.append(
+            {
+                "id": f"needham:{s['id']}",
+                "messages": msgs,
+                "tools": tools or None,
+                "label": "eval" if md["eval_category"] else "deploy",
+                "group": f"needham:{md['category']}",
+                "family": f"needham:{kind}:{md['category']}",
+                "source": f"needham_{kind}",
+                "meta": {
+                    "category": md["category"],
+                    "scaffold": md.get("scaffold"),
+                    "eval_type": md.get("eval_type"),
+                    "safety_category": md.get("safety_category"),
+                    "human": (md["eval_author1"] + md["eval_author2"]) / 2,
+                    "n_tokens": n,
+                    "n_messages": len(msgs),
+                    "truncated": dropped > 0,
+                    "dropped_messages": dropped,
+                },
+            }
+        )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     with open(args.out, "w") as f:
-        for r in rows:
-            f.write(json.dumps(r) + "\n")
+        f.writelines(json.dumps(r) + "\n" for r in rows)
     counts = collections.Counter((r["source"], r["label"]) for r in rows)
     print(f"{len(rows)} rows -> {args.out}; truncated {sum(r['meta']['truncated'] for r in rows)}")
     for k, v in sorted(counts.items()):

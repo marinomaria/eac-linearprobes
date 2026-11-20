@@ -10,6 +10,7 @@ Usage:
     python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/cues
     python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/mix-main
 """
+
 import argparse
 import json
 import os
@@ -33,16 +34,19 @@ def main():
     acts, rows, info = load(args.acts)
     layers = saved["info"]["layers"]
     if info["model"] != saved["info"]["model"] or not set(layers) <= set(info["layers"]):
-        parser.error(f"activations ({info['model']}, layers {info['layers']}) do not match probes "
-                     f"({saved['info']['model']}, layers {layers})")
+        parser.error(
+            f"activations ({info['model']}, layers {info['layers']}) do not match probes "
+            f"({saved['info']['model']}, layers {layers})"
+        )
 
     scores = score_all(saved, probes, lambda layer: layer_tensor(acts, info["layers"].index(layer)), get_device())
 
     name = os.path.basename(os.path.normpath(args.acts))
     out_path = os.path.join(args.trained, f"scores_{name}.jsonl")
     with open(out_path, "w") as f:
-        for i, r in enumerate(rows):
-            f.write(json.dumps({**r, "scores": {k: float(v[i]) for k, v in scores.items()}}) + "\n")
+        f.writelines(
+            json.dumps({**r, "scores": {k: float(v[i]) for k, v in scores.items()}}) + "\n" for i, r in enumerate(rows)
+        )
 
     df = pd.DataFrame(rows)
     m = df["label"].notna().to_numpy()

@@ -11,6 +11,7 @@ the FIBS paper's LinearEnsemble / MLPEnsemble, Hollinsworth, Spies et al., arXiv
 Choices not specified by the paper (adjust freely): per-layer standardization with train-set mean/std; logits
 averaged in the ensemble; cosine learning-rate decay over a fixed number of epochs.
 """
+
 import collections
 import math
 import os
@@ -31,13 +32,13 @@ class LayerProbe(nn.Module):
         super().__init__()
         self.register_buffer("mean", mean)
         self.register_buffer("std", std)
-        self.net = nn.Linear(d, 1) if hidden == 0 else nn.Sequential(nn.Linear(d, hidden), nn.GELU(),
-                                                                     nn.Linear(hidden, 1))
+        self.net = (
+            nn.Linear(d, 1) if hidden == 0 else nn.Sequential(nn.Linear(d, hidden), nn.GELU(), nn.Linear(hidden, 1))
+        )
         self.hidden = hidden
 
     def forward(self, x):
         return self.net((x - self.mean) / self.std).squeeze(-1)
-
 
 
 def mean_diff_probe(x, y, weights=None):
@@ -54,8 +55,9 @@ def mean_diff_probe(x, y, weights=None):
     return probe.eval()
 
 
-def train_layer_probe(x, y, hidden=0, epochs=None, lr=5e-3, batch_size=32, weight_decay=0.01, seed=0, device="cpu",
-                      weights=None):
+def train_layer_probe(
+    x, y, hidden=0, epochs=None, lr=5e-3, batch_size=32, weight_decay=0.01, seed=0, device="cpu", weights=None
+):
     """x: float32 [n, d], y: float32 [n] in {0, 1}. Returns (probe on CPU, final train BCE).
 
     weights: optional per-row loss weights [n] (see balance_weights); the reported BCE is weighted too.
@@ -114,8 +116,9 @@ def score_all(saved, probes, layer_x, device="cpu", chunk=4096):
         x = layer_x(layer)
         for kind, ps in probes.items():
             p = ps[j].to(device)
-            scores[f"{kind}_L{layer}"] = torch.cat([p(x[i:i + chunk].to(device)).cpu()
-                                                    for i in range(0, len(x), chunk)]).numpy()
+            scores[f"{kind}_L{layer}"] = torch.cat(
+                [p(x[i : i + chunk].to(device)).cpu() for i in range(0, len(x), chunk)]
+            ).numpy()
             ps[j] = p.cpu()
     for kind, kept in saved["kept"].items():
         scores[f"{kind}_ensemble"] = np.mean([scores[f"{kind}_L{layers[j]}"] for j in kept], axis=0)
@@ -158,8 +161,11 @@ def recall_at_fpr(y, s, fpr=0.01):
 def metrics(y, s, groups, n_boot=1000, seed=0):
     """AUROC and recall@1%FPR with 95% CIs from a bootstrap over groups."""
     y, s, groups = np.asarray(y), np.asarray(s), np.asarray(groups)
-    out = {"n": len(y), "auroc": roc_auc_score(y, s) if len(set(y)) == 2 else np.nan,
-           "recall@1%fpr": recall_at_fpr(y, s)}
+    out = {
+        "n": len(y),
+        "auroc": roc_auc_score(y, s) if len(set(y)) == 2 else np.nan,
+        "recall@1%fpr": recall_at_fpr(y, s),
+    }
     uniq, inv = np.unique(groups, return_inverse=True)
     members = [np.flatnonzero(inv == g) for g in range(len(uniq))]
     rng = np.random.default_rng(seed)

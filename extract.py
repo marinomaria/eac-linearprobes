@@ -18,6 +18,7 @@ Usage:
     python extract.py --model qwen3.8-27b --data cues
     python extract.py --model qwen3.8-27b --data data/mix-main.jsonl
 """
+
 import argparse
 import os
 
@@ -45,8 +46,12 @@ def main():
     parser.add_argument("--out", default=None, help="Output directory (default: output/<model>/acts/<data name>)")
     parser.add_argument("--layers", type=int, nargs="+", default=None)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--max-batch-tokens", type=int, default=16384,
-                        help="Cap on a batch's padded tokens (long agentic transcripts and mix prompts)")
+    parser.add_argument(
+        "--max-batch-tokens",
+        type=int,
+        default=16384,
+        help="Cap on a batch's padded tokens (long agentic transcripts and mix prompts)",
+    )
     args = parser.parse_args()
 
     rows = [r for data in args.data for r in build_rows(data)]

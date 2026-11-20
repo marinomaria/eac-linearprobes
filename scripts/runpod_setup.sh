@@ -24,4 +24,4 @@ grep -q "HF_HOME=/workspace/hf-cache" ~/.bashrc || echo "export HF_HOME=/workspa
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 python -c "import torch; print(f'CUDA available: {torch.cuda.is_available()}, devices: {torch.cuda.device_count()}')"
 echo
-echo "Setup complete. Next: cd ${REPO_DIR} && bash scripts/runpod_run.sh qwen3.8-27b"
+echo "Setup complete. Next: cd ${REPO_DIR} && bash scripts/runpod_run.sh extract.py --model qwen3.8-27b --data cues"

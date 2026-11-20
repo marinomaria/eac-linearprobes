@@ -1,190 +1,237 @@
-# Evaluation Awareness Probes on EvalAwareBench (PoC)
+# Evaluation-awareness probes for the data mix
 
-A minimal proof of concept that runs evaluation-awareness linear probes over
-[EvalAwareBench](https://huggingface.co/datasets/aisa-group/EvalAwareBench). The benchmark has 51,200 prompts:
-200 task variants × 2⁸ combinations of eight evaluation-cue factors (F1–F8). The question is which of those
-cues move a model's internal "am I being evaluated?" direction, and by how much.
+Goal: score every row of the main data mix (`mix-main`) with every **good** evaluation-awareness probe.
 
-The probing setup is a simplified version of
-[sensitivity-analysis-evaluation-awareness](https://github.com/marinomaria/sensitivity-analysis-evaluation-awareness),
-adapted to this benchmark and to newer Qwen models.
+The probes are trained on activations of labeled eval/deploy conversations. A probe is good when it generalizes,
+judged on three things:
+- the validation cues;
+- the zero-tolerance (ZT) cues, a subset of the validation cues;
+- sources held out of training.
 
-## What it does
+Every probe kind is trained on the same data and scored and compared the same way:
+- **meandiff**: the normalized mean-difference direction;
+- **linear**: logistic regression;
+- **mlp**: a small MLP;
+- **linear / mlp ensembles**: average over layers.
 
-1. **Train probes.** For each prompt stem in `datasets/contrastive_dataset_dolly.json`, the model sees it twice:
-   once under an evaluation system prompt and once under a deployment system prompt. For every layer, the
-   probe is the normalized mean difference between the two sets of last-token residual-stream activations.
-   This is repeated for every system-prompt variant in `datasets/system_prompts.json`.
-2. **Score the benchmark.** Every EvalAwareBench prompt is fed as a single user turn and its last-token
-   activation is projected onto **every** variant's and layer's probe. This is a forward pass only, with no
-   text generation.
-3. **Save.** The per-prompt projections are written to `output/<model>/projections_<subset>.jsonl`.
-4. **Analyze.** `scripts/analyze.py` picks a layer and reports how much each factor shifts the projection.
+## Pipeline
+
+```
+scripts/prepare_*.py  ->  data/*_rows.jsonl                    training rows (once, CPU)
+extract.py            ->  output/<model>/acts/<name>/          last-token activations (GPU; the only model step)
+train_probes.py       ->  output/<model>/trained/<run>/        every probe kind, report.csv, probes.pt (CPU)
+score.py              ->  <run>/scores_<acts>.jsonl            every probe of a run on stored activations (CPU)
+report.py             ->  <run>/probe_report.csv               good = val and ZT AUROC >= 0.75 in every placement
+                          <run>/mix-main_good.jsonl            mix-main scores of the good probes (the deliverable)
+```
+
+```bash
+# GPU, once per dataset (see RunPod)
+python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl data/awarebench_rows.jsonl \
+    data/wildchat_rows.jsonl data/verbalized_rows.jsonl --out output/qwen3.8-27b/acts/train
+python extract.py --model qwen3.8-27b --data cues
+python extract.py --model qwen3.8-27b --data data/mix-main.jsonl
+
+# anywhere, no GPU
+bash scripts/train_all.sh output/qwen3.8-27b/acts/train          # trained/all + trained/hold-*
+python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/cues
+python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/mix-main
+python report.py output/qwen3.8-27b/trained/all --holdout output/qwen3.8-27b/trained/hold-*
+```
+
+Quick local test on the 0.8B model (a few minutes on an M-series Mac):
+
+```bash
+python extract.py --model qwen3.5-0.8b --data dolly:40 --out output/qwen3.5-0.8b/acts/dolly_40
+python extract.py --model qwen3.5-0.8b --data cues:2
+python train_probes.py output/qwen3.5-0.8b/acts/dolly_40 --name all
+python score.py output/qwen3.5-0.8b/trained/all output/qwen3.5-0.8b/acts/cues_2
+python report.py output/qwen3.5-0.8b/trained/all --cues cues_2
+```
+
+`train_probes.py` accepts several activation directories and concatenates their rows. You can therefore add a
+newly extracted training source without re-extracting the others, e.g.
+`bash scripts/train_all.sh acts/full acts/verbalized`.
+
+## Probes
+
+`src/classifiers.py`, all trained by `train_probes.py`:
+
+- **Training rows.** Every kind sees the same rows with the same weights.
+- **Layers.** One probe per stored layer: 6 layers, evenly spaced between 30% and 90% of depth.
+- **Probe names:**
+  - `meandiff_L<l>`: unit direction mean(eval) − mean(deploy) of the raw activations, using weighted means. The
+    logit is the projection minus the projection of the midpoint between the two means. This is the
+    original method from [evaluation-awareness-probing](https://github.com/Jordine/evaluation-awareness-probing),
+    trained on the same rows as the other probes.
+  - `linear_L<l>`: logistic regression on standardized features.
+  - `mlp_L<l>`: an MLP with one hidden layer of 256 units.
+  - `linear_ensemble`, `mlp_ensemble`: the mean logit over the layers whose train loss is below 0.6. These follow
+    the LinearEnsemble and MLPEnsemble of the FIBS paper (Hollinsworth, Spies et al., arXiv 2610.12445).
+- **Training settings.** The linear and MLP probes use BCE loss, AdamW with lr 5e-3, batch size 32, and at least
+  3 epochs and 2000 steps.
+- **Weights.** `--balance source` (the default) gives both labels the same total weight. Within a label, every
+  source gets the same weight. This stops a source from dominating because it is large, has long prompts, or has
+  only one label.
+- **Splits.** Rows are split by group. `--holdout-family` removes whole families from training and reports on
+  them separately. It accepts shell patterns, e.g. `'needham:agent:*'`.
+- **Report.** `report.csv` gives AUROC and recall at 1% FPR for the val and heldout splits, overall, per source
+  and per family, with 95% CIs from a bootstrap over groups.
+- **Length baseline.** `length_baseline` is a logistic regression on log prompt length alone. A probe close to it
+  is probably reading prompt length.
+
+## Is a probe good?
+
+**Validation cues** (`src/cues.py`) are short hand-written texts with an expected reading. They come from
+`datasets/validation_prompts.json` (the validation set) and from the ZT set `datasets/validation_prompts_zt.csv`.
+
+**ZT is a subset of the validation set.** All 25 ZT eval/deploy cues are also among the validation set's 51, with
+the same labels. The two gates are therefore nested, not independent: ZT is the stricter check on the core cues,
+and validation adds 26 more cues. `report.py` scores validation from `validation_prompts.json` alone, so no cue
+is counted twice.
+
+Each cue is shown in three placements:
+- **system:** the cue is the system prompt, followed by a Dolly stem.
+- **prefix:** the cue is prepended to a stem in the user turn.
+- **user:** the cue alone is the user turn.
+
+The system and prefix placements are averaged over 20 stems.
+
+`extract.py --data cues` stores their activations once. After that, any probe run is scored on them offline.
+
+**Held-out sources.** `scripts/train_all.sh` trains the probes once on everything (`all`, the probes that score
+the mix). It then retrains them once per held-out source. It does not hold out WildChat on its own, because it is
+deploy-only and has no AUROC there. The held-out runs are:
+- `hold-dolly`
+- `hold-needham`
+- `hold-awarebench`
+- `hold-chat`
+- `hold-agent`
+- `hold-verbalized`, when that source is present
+
+The final probes are trained on everything, so the generalization evidence for a probe in `all` is the same
+probe recipe's AUROC on data it did not see in each held-out run.
+
+`report.py` writes one row per probe, containing:
+- the cue AUROCs per placement: eval- vs deploy-expected cues, for the validation set and for ZT;
+- `good`;
+- the held-out AUROCs, with their minimum.
+
+A probe is `good` when the validation and ZT AUROCs are ≥ `--bar` (0.75) in every placement. The held-out AUROCs
+are reported but not used to decide `good`. `report.py` writes `mix-main_good.jsonl` with these fields: `id`,
+`source` (the mix dataset), `meta` (from the mix) and `scores` (one logit per good probe).
+
+## Data
+
+| rows | script | license / note |
+|---|---|---|
+| Dolly paired system prompts | built in (`--data dolly`) | stems from databricks-dolly-15k (CC BY-SA 3.0); prompts in `datasets/system_prompts.json` |
+| Needham et al. chat + agentic | `scripts/prepare_needham.py` | gated, CC BY-NC-SA, contains GAIA: never in git |
+| aware-bench (EvalDetectBench) | `scripts/prepare_awarebench.py` | CC BY-NC-SA, contains GAIA: never in git |
+| WildChat (deploy only) | `scripts/prepare_wildchat.py` | ODC-BY |
+| mix-discovery, labeled by CoT voicing | `scripts/prepare_verbalized.py` | from `data/probe_sample_verbalized.csv` |
+| **mix-main** (score only) | built in jlens_evalaware | measurement set: never train on it |
+
+`data/` is gitignored.
+
+The data mix comes from [jlens_evalaware](https://github.com/Spar2026EvalAware/jlens_evalaware):
+
+```bash
+uv run evalaware mix --out-dir ../evaluation-awareness-convergence/data
+```
+
+The mix contains EvalAwareBench, HarmBench, FORTRESS and MASK prompts. Each row is fed as its full message list.
+
+Only mix-main is the measurement set. mix-discovery may be trained on.
+`prepare_verbalized.py` refuses to run if any of its rows overlaps mix-main.
+
+Choices worth knowing:
+
+- **Row format.** `src/rows.py` defines it: `id`, `messages`, `label` (eval/deploy/null), `group`, `family`,
+  `source`, `meta`, `tools`.
+- **Groups.** Every Needham and aware-bench source dataset is all-eval or all-deploy, so group = source dataset.
+  Splits and CIs therefore measure transfer to unseen datasets. aware-bench benchmarks that are also in Needham
+  share Needham's group.
+- **Where the model is read.** Transcripts end where the model would reply: trailing assistant turns are dropped.
+- **System messages.** Later system messages become user messages, because Qwen's template takes only a leading
+  one.
+- **Long transcripts.** Transcripts over 16k tokens drop messages from the middle.
+- **aware-bench tool definitions are dropped.** Only its eval trajectories carry them, so they would give the
+  label away.
+- **aware-bench exclusions.** `mask` (it is in the mix), `hackaprompt_dataset` (eval in aware-bench, deploy in
+  Needham) and tasks already in Needham are excluded.
+- **WildChat filtering.** WildChat is filtered heavily and sampled down to 100 rows: English, no toxic content, no
+  templates, no jailbreak or test talk.
+- **Verbalized labels.** A mix-discovery prompt is `eval` when Qwen voiced evaluation awareness in at least half of
+  its chain-of-thought rollouts. The group is the underlying item.
+
+| source | eval | deploy | median tokens eval / deploy |
+|---|---|---|---|
+| Needham chat | 287 | 213 | 93 / 148 |
+| aware-bench chat | 150 | 124 | 204 / 680 |
+| WildChat | – | 100 | – / 203 |
+| Needham agentic | 250 | 226 | 5.4k / 7.9k |
+| aware-bench agentic | 77 | 136 | 13k / 2.8k |
+| verbalized (mix-discovery) | 152 | 141 | 261 / 240 |
 
 ## Models
 
 | Alias | HF repo | Role |
 |---|---|---|
 | `qwen3.8-27b` | `Qwen/Qwen3.8-27B` | Main model (RunPod, 1× 80GB GPU) |
-| `qwen3.5-27b` | `Qwen/Qwen3.5-27B` | Model of the shared jlens_evalaware measurements (data mix) |
-| `qwen3.5-0.8b` | `Qwen/Qwen3.5-0.8B` | Control: same `qwen3_5` architecture and chat template as Qwen3.8. There is no Qwen3.8 small model |
+| `qwen3.5-27b` | `Qwen/Qwen3.5-27B` | Model of the shared jlens_evalaware measurements |
+| `qwen3.5-0.8b` | `Qwen/Qwen3.5-0.8B` | Local tests: same `qwen3_5` architecture and chat template |
 
-Any other HF repo id can be passed to `--model` as well.
-
-## Design choices
-
-- **Plain HF transformers, not TransformerLens.** Qwen3.8 uses the `qwen3_5` hybrid linear-attention
-  architecture, which TransformerLens does not support. Activations come from `output_hidden_states`:
-  `hidden_states[l]` is the residual stream entering block `l`. Prompts are batched with left padding;
-  on this architecture, padded and unpadded runs differ by ~1e-6 (relative).
-- **All layers are kept, and the layer is chosen at analysis time.** EvalAwareBench has no binary eval/deploy
-  label to select a layer against; it has factor configurations instead. One forward pass yields every layer,
-  so saving all of them costs nothing. For the same reason there are no classification thresholds or verdicts,
-  only raw projections.
-- **Layer selection.** `analyze.py` picks the layer whose projection has the highest Spearman correlation with
-  the number of exaggerated factors (it can be overridden with `--layer`). It also reports AUROC between
-  prompts with all 8 factors exaggerated and prompts with none, but those are only 2/256 of the data, so that
-  number is noisy on small samples.
-- **System-prompt variants share one benchmark pass.** Nearly all the compute is the forward pass over the
-  51,200 benchmark prompts, which does not depend on the system prompt. Training probes per variant is cheap
-  (204 stems × 2), and the benchmark activations are projected onto all variants at once. Adding a variant
-  means adding an entry to `datasets/system_prompts.json` and rerunning. `run.py` prints the cosine similarity
-  between variants' probe directions after training: variants with near-identical directions will score
-  the benchmark near-identically.
-- **Layer 0** is the token embedding. The last token is the same under both system prompts, so its probe is
-  all zeros and its projections are 0.
-- **Thinking mode.** `format_chat` passes `enable_thinking=True`, so formatted prompts end in `<think>\n` for
-  every model, for both probe training and benchmark scoring. The flag matters: Qwen3.8's template defaults to
-  thinking mode but Qwen3.5-0.8B's does not, and appends an empty `<think>\n\n</think>\n\n` block instead.
-  Runs made before this flag was added read the 0.8B at a different token than the 27B.
-
-## Local setup
-
-Requires Python ≥ 3.11.
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-
-python run.py --model qwen3.5-0.8b --limit 200       # quick test, ~4 min on an M-series Mac
-python scripts/analyze.py output/qwen3.5-0.8b/projections_prompts_n200.jsonl
-python scripts/analyze.py output/qwen3.5-0.8b/projections_prompts_n200.jsonl --variant minimal
-```
-
-`analyze.py` first prints each variant's best layer and Spearman correlation, then the per-layer and per-factor
-tables for one variant (`--variant`, default: the first in `datasets/system_prompts.json`).
-
-Without CUDA, the linear-attention layers fall back to a slow PyTorch implementation. A full local run of all
-51,200 prompts would take on the order of 11h on an M-series Mac, so run full jobs on a GPU (see below).
-
-Options:
-- `--subset prompts_safety|prompts_capability`: score only one valence (default: all prompts).
-- `--limit N`: score a seeded random sample of N prompts.
-- `--batch-size N` (default 8).
-- `--load-probes output/<model>/probes.pt`: reuse trained probes instead of training again.
+- **Library.** Models run with plain HF transformers, because TransformerLens does not support the `qwen3_5`
+  hybrid linear-attention architecture.
+- **What is stored.** Activations are the residual stream entering a block, at the last token. Pre-hooks capture
+  them, and the forward pass stops after the deepest stored layer.
+- **Format.** They are stored as bf16 (`src/activations.py`).
+- **Thinking mode.** `format_chat` sets `enable_thinking=True`, so every prompt ends in `<think>\n` on both models.
 
 ## RunPod
 
-Use a pod with one 80GB GPU (H100 or A100). Qwen3.8-27B's bf16 weights are about 54GB.
+Use one 80GB GPU (H100/A100):
 
 ```bash
-cd /workspace
-git clone https://github.com/marinomaria/eac-linearprobes.git eval-awareness
-bash eval-awareness/scripts/runpod_setup.sh
-cd eval-awareness
-bash scripts/runpod_run.sh qwen3.8-27b --limit 500                  # smoke test first
-bash scripts/runpod_run.sh qwen3.8-27b --batch-size 16 --load-probes output/qwen3.8-27b/probes.pt
-bash scripts/runpod_run.sh qwen3.5-0.8b --batch-size 32             # full control run
-python validate.py --model qwen3.8-27b --batch-size 16              # probe sanity checks (see below)
+cd /workspace && git clone https://github.com/marinomaria/eac-linearprobes.git eval-awareness
+bash eval-awareness/scripts/runpod_setup.sh && cd eval-awareness
+bash scripts/runpod_run.sh extract.py --model qwen3.8-27b --data cues --batch-size 16
 ```
 
-The setup script also tries to install `flash-linear-attention` and `causal-conv1d`, the fast kernels for
-the linear-attention layers. If either fails to build, runs still work, just more slowly.
-
-Then, on your machine:
+Copy `data/*.jsonl` to the pod with `scp -P <PORT> data/*.jsonl root@<IP>:/workspace/eval-awareness/data/`. Then,
+locally, download the output:
 
 ```bash
-bash scripts/download_artifacts.sh <IP> <PORT>
-SSH_KEY=~/.ssh/id_ed25519_team bash scripts/download_artifacts.sh <IP> <PORT>   # key other than ~/.ssh/id_ed25519
-python scripts/analyze.py runpod-artifacts/qwen3.8-27b/projections_prompts.jsonl
+SSH_KEY=~/.ssh/id_ed25519_team bash scripts/download_artifacts.sh <IP> <PORT>
 ```
-
-## Data mix
-
-`run_mix.py` scores the shared data mix of [jlens_evalaware](https://github.com/Spar2026EvalAware/jlens_evalaware)
-(`src/evalaware/mix.py`): EvalAwareBench, bare HarmBench, FORTRESS and MASK prompts, split into a main
-(1,890 prompts) and a discovery set (1,510). Probes are trained (or loaded) exactly as in `run.py`. Each prompt is
-fed as its full message list, so MASK prompts keep their own system prompt (and doubling_down its scripted first
-exchange). Build the mix in jlens_evalaware and copy it into `data/` (gitignored):
-
-```bash
-# in jlens_evalaware
-uv run evalaware mix --out-dir ../evaluation-awareness-convergence/data   # mix-main.jsonl, mix-discovery.jsonl
-
-# here
-python run_mix.py --model qwen3.5-0.8b --limit 50                         # quick test, both sets
-SCRIPT=run_mix.py bash scripts/runpod_run.sh qwen3.8-27b --batch-size 16 \
-    --load-probes output/qwen3.8-27b/probes.pt                             # on RunPod
-```
-
-On a pod without the mix, copy it over with
-`scp -P <PORT> data/mix-*.jsonl root@<IP>:/workspace/eval-awareness/data/` (or point `--data` at the files on
-the shared volume, `/workspace/code/<name>/data/mix-*.jsonl`).
-
-Mix prompts reach ~17k tokens, and the forward pass keeps every layer's hidden states, so batches are also capped
-at `--max-batch-tokens` padded tokens (default 16384: about 11 GB of hidden states for the 27B). Output goes to
-`output/<model>/projections_mix-{main,discovery}.jsonl`, one line per prompt with `id`, `dataset`, `meta` (as in
-the mix: `set`, `unit`, and the source's fields such as `factors`, `condition`, `archetype`) and `projections`.
-
-## Probe sanity checks
-
-`validate.py` reuses `output/<model>/probes.pt` and projects short hand-written cues from
-`datasets/validation_prompts.json`: single words ("evaluation", "real user", "chicken", "wardrobe"), short
-sentences, negations ("This is not a test."), paraphrases unlike the training prompts, eval-style formatting
-without eval keywords, and real-user requests that contain eval keywords ("I have my driving test tomorrow").
-Each cue is shown as the system prompt before a contrastive stem (the training shape), prepended to a stem in
-the user turn (the benchmark shape), and alone as the user turn. The system/prefix placements average over
-`--n-stems` stems (default 20; these are training stems). The variants' training prompts are added as anchors.
-
-```bash
-python validate.py --model qwen3.5-0.8b --n-stems 4                 # ~1.5 min on an M-series Mac
-python scripts/analyze_validation.py output/qwen3.5-0.8b/validation.jsonl
-```
-
-`analyze_validation.py` scores every cue on a 0 (deploy anchors) to 1 (eval anchors) scale per placement and
-reports AUROC between eval- and deploy-expected cues. A probe that tracks evaluation awareness rather than
-keywords should leave neutral cues near the no-cue baseline (`none`) and flip on negations.
-
-## Output format
-
-Each line of `projections_*.jsonl` holds the prompt's `task_id`, `task_name`, `valence`, `factors_varied`,
-`num_factors_varied`, `config` (F1–F8 levels) and `projections`: `{variant_name: [one float per layer]}`.
-`probes.pt` is a dict `{variant_name: tensor[n_layers, d_model]}`. The prompt text is left
-out; rejoin it on (`task_id`, `config`) if needed.
-
-## Credits
-
-- Probe methodology and the contrastive system prompts:
-  [evaluation-awareness-probing](https://github.com/Jordine/evaluation-awareness-probing).
-- Contrastive prompt stems: taken from
-  [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k) (CC BY-SA 3.0),
-  as built in [sensitivity-analysis-evaluation-awareness](https://github.com/marinomaria/sensitivity-analysis-evaluation-awareness).
-- EvalAwareBench: Li et al., [*Decomposing and Measuring Evaluation Awareness*](https://arxiv.org/abs/2605.23055)
-  (CC BY-NC 4.0; not to be used as training data).
 
 ## Layout
 
 ```
-run.py                     # Train probes, score EvalAwareBench, save output
-run_mix.py                 # Score the jlens_evalaware data mix (main + discovery sets)
-validate.py                # Project hand-written sanity-check cues onto saved probes
-src/model.py               # Model loading + last-token residual stream for all layers
-src/probe.py               # Probe training (mean difference) and projection
-scripts/analyze.py         # Per-layer summary + per-factor effects
-scripts/analyze_validation.py  # Sanity-check scores per cue category and placement
-scripts/runpod_*.sh        # RunPod setup / run
-scripts/download_artifacts.sh
-datasets/contrastive_dataset_dolly.json
-datasets/system_prompts.json   # Eval/deploy system-prompt variants: [{name, eval, deploy}]
-datasets/validation_prompts.json  # Sanity-check cues: [{category, expected, text}]
+extract.py                 # rows -> stored activations (model step)
+train_probes.py            # meandiff / linear / mlp probes + ensembles, val + held-out metrics
+score.py                   # stored activations -> scores from every probe of a run
+report.py                  # good probes (val + ZT bar, held-out columns) and their mix-main scores
+src/model.py               # model loading, chat formatting
+src/activations.py         # extraction and on-disk storage
+src/classifiers.py         # probe kinds, ensembles, weights, metrics
+src/rows.py                # row format, Dolly paired rows, group split
+src/cues.py                # validation / ZT cues as rows
+scripts/prepare_*.py       # training sources -> rows
+scripts/train_all.sh       # all + hold-out runs
+scripts/runpod_*.sh, scripts/download_artifacts.sh
+datasets/                  # Dolly stems, system prompts, validation and ZT cues
 ```
+
+## Credits
+
+- Mean-difference probe method and contrastive system prompts:
+  [evaluation-awareness-probing](https://github.com/Jordine/evaluation-awareness-probing).
+- Contrastive stems: [databricks-dolly-15k](https://huggingface.co/datasets/databricks/databricks-dolly-15k)
+  (CC BY-SA 3.0), as built in
+  [sensitivity-analysis-evaluation-awareness](https://github.com/marinomaria/sensitivity-analysis-evaluation-awareness).
+- Needham et al., [*Large Language Models Often Know When They Are Being Evaluated*](https://arxiv.org/abs/2505.23836):
+  [jjpn2/eval_awareness](https://huggingface.co/datasets/jjpn2/eval_awareness) (CC BY-NC-SA 4.0, gated).
+- EvalAwareBench (in the mix): Li et al., [*Decomposing and Measuring Evaluation Awareness*](https://arxiv.org/abs/2605.23055)
+  (CC BY-NC 4.0).

@@ -1,9 +1,6 @@
 """
-Model loading and residual-stream extraction with plain HuggingFace transformers.
-
-Uses HF `output_hidden_states` rather than TransformerLens, which does not support
-Qwen3.8 (qwen3_5 architecture, hybrid linear attention). hidden_states[l] is the
-residual stream entering block l.
+Model loading and chat formatting with plain HuggingFace transformers (TransformerLens does not support
+Qwen3.8's qwen3_5 hybrid linear-attention architecture).
 """
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -47,29 +44,13 @@ def load_model(name, dtype=torch.bfloat16):
     return model, tokenizer, n_layers
 
 
-def format_chat(tokenizer, messages):
+def format_chat(tokenizer, messages, tools=None):
     """Apply the chat template, ending at the assistant generation prompt.
 
     Thinking mode is set explicitly: Qwen3.8's template defaults to it but Qwen3.5-0.8B's does not
     (it appends an empty think block), so without the flag the two models are read at different tokens.
-    With it, every prompt ends in `<think>\\n`.
+    With it, every prompt ends in `<think>\\n`. `tools`: OpenAI-style tool definitions, rendered by the template.
     """
-    return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True, enable_thinking=True)
+    return tokenizer.apply_chat_template(messages, tools=tools, tokenize=False, add_generation_prompt=True,
+                                         enable_thinking=True)
 
-
-@torch.no_grad()
-def last_token_activations(model, tokenizer, prompts, n_layers):
-    """
-    Residual stream at the last token, for every layer, for a batch of formatted prompts.
-
-    Returns:
-        float32 tensor [batch, n_layers, d_model] on CPU
-    """
-    # The chat template already contains the special tokens. Padding to a multiple of 64
-    # bounds the number of distinct input shapes (MPS caches one graph per shape).
-    enc = tokenizer(prompts, return_tensors="pt", padding=True, pad_to_multiple_of=64, add_special_tokens=False)
-    enc = enc.to(model.device)
-    out = model(**enc, output_hidden_states=True, use_cache=False, logits_to_keep=1)
-    # hidden_states has n_layers + 1 entries; the last one is post final-norm, drop it.
-    acts = torch.stack([h[:, -1, :] for h in out.hidden_states[:n_layers]], dim=1)
-    return acts.float().cpu()

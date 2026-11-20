@@ -23,7 +23,7 @@ Outputs, in <acts parent>/trained/<name>/:
 Usage:
     python train_probes.py output/qwen3.5-0.8b/acts/dolly_40 --holdout-family sysprompt:minimal
     python train_probes.py output/qwen3.8-27b/acts/train --holdout-family 'needham:agent:*' --name hold-agent
-    python train_probes.py output/qwen3.8-27b/acts/full output/qwen3.8-27b/acts/verbalized --name all
+    python train_probes.py output/qwen3.8-27b/acts/verbalized --name verbalized
 """
 import argparse
 import fnmatch
@@ -97,6 +97,7 @@ def main():
     for kind, k in kept.items():
         print(f"{kind}_ensemble: layers {[info['layers'][j] for j in k]}")
     saved = {"info": info, "kept": kept, "losses": losses, "mlp_hidden": args.mlp_hidden, "args": vars(args),
+             "train_sources": sorted(df["source"][train].unique()),
              "state": {k: [p.state_dict() for p in v] for k, v in probes.items()}}
 
     scores = score_all(saved, probes, lambda layer: layer_tensor(acts, info["layers"].index(layer)), device)
@@ -110,7 +111,7 @@ def main():
             continue
         subsets = [("all", m)]
         for col in ("source", "family"):
-            if df[col][m].nunique() > 1:
+            if col == "source" or df[col][m].nunique() > 1:
                 subsets += [(f"{col}:{v}", m & (df[col] == v).to_numpy()) for v in sorted(df[col][m].unique())]
         for subset, mm in subsets:
             if len(set(y[mm])) < 2:

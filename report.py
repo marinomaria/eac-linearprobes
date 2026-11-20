@@ -1,33 +1,44 @@
 #!/usr/bin/env python
 """
-Which probes are good, and the data-mix scores of the good ones.
+Which probes are good, and the data-mix scores of the good ones, across one or more probe runs (e.g. "all", trained
+on the main training set, and "verbalized", trained on mix-discovery rows labeled by CoT voicing alone).
 
 A probe is good when its AUROC (eval- vs deploy-expected cues, src/cues.py) is >= --bar on the validation set (val)
 AND on the zero-tolerance set (zt), in every placement (system, prefix, user). ZT is a subset of val (25 of its 51
 eval/deploy cues), so the two gates are nested, not independent: zt is the stricter check on the core cues, val
-adds the other 26. Cue scores come from <main>/scores_cues.jsonl (score.py <main> <acts>/cues), averaged over the
+adds the other 26. Cue scores come from <run>/scores_cues.jsonl (score.py <run> <acts>/cues), averaged over the
 stems of each cue x placement.
 
-Held-out columns: the same probe (name) trained in each --holdout run, scored on the rows that run left out of
-training (report.csv, split "heldout", subset "all"). Reported, not gated on.
+Held-out columns, one per training source (held:<source>; reported, not gated on): the probe's AUROC on that
+source's rows when they were not used to train it.
+  - Sources the run trained on: from the --holdout runs of the same recipe (same activation directories) that held
+    the source out (report.csv, split "heldout", subset "source:<s>"); the minimum if several did.
+  - Sources the run never saw: computed from its labeled scores files, <run>/scores_<acts>.jsonl
+    (score.py <run> <labeled acts>), e.g. the verbalized run scored on the main training activations.
+hold_min is the minimum over sources.
 
-Outputs, in <main>/:
-  probe_report.csv     one row per probe: cue AUROCs, good, held-out AUROCs
-  <mix>_good.jsonl     if <main>/scores_<mix>.jsonl exists (score.py <main> <acts>/<mix>): one line per mix row with
-                       id, source (the mix's dataset), meta and "scores": {good probe: logit}
+Outputs, in the first run's directory:
+  probe_report.csv     one row per probe (<run>/<probe> with several runs): cue AUROCs, good, held-out AUROCs
+  <mix>_good.jsonl     one line per mix row with id, source (the mix's dataset), meta and "scores": {good probe:
+                       logit}, from each run's scores_<mix>.jsonl (score.py <run> <acts>/<mix>); written when every
+                       run with a good probe has one
 
 Usage:
-    python report.py output/qwen3.8-27b/trained/all --holdout output/qwen3.8-27b/trained/hold-*
+    python report.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/trained/verbalized \
+        --holdout output/qwen3.8-27b/trained/hold-*
 """
 import argparse
+import glob
 import json
 import os
 
 import numpy as np
 import pandas as pd
+import torch
 from sklearn.metrics import roc_auc_score
 
 from src.cues import PLACEMENTS, VAL, ZT
+from src.rows import LABELS
 
 
 def cue_aurocs(path):
@@ -49,40 +60,82 @@ def cue_aurocs(path):
     return out
 
 
-def heldout_auroc(run_dir):
-    r = pd.read_csv(os.path.join(run_dir, "report.csv"))
-    r = r[(r["split"] == "heldout") & (r["subset"] == "all")]
-    return dict(zip(r["probe"], r["auroc"]))
+def run_args(run):
+    saved = torch.load(os.path.join(run, "probes.pt"), weights_only=False)
+    acts = saved["args"]["acts"]
+    acts = [acts] if isinstance(acts, str) else acts
+    return {"acts": [os.path.normpath(os.path.abspath(a)) for a in acts],
+            "train_sources": saved.get("train_sources")}
+
+
+def heldout_by_source(run, holdouts):
+    """{probe: {source: auroc}} on sources the probe's training did not include (see module docstring)."""
+    info = run_args(run)
+    out = {}
+
+    def put(probe, source, auroc):
+        if not np.isnan(auroc):
+            cell = out.setdefault(probe, {})
+            cell[source] = min(cell.get(source, np.inf), auroc)
+
+    for h in holdouts:
+        if os.path.samefile(h, run) or run_args(h)["acts"] != info["acts"]:
+            continue
+        r = pd.read_csv(os.path.join(h, "report.csv"))
+        r = r[(r["split"] == "heldout") & r["subset"].str.startswith("source:")]
+        for t in r.itertuples():
+            put(t.probe, t.subset.removeprefix("source:"), t.auroc)
+
+    for path in glob.glob(os.path.join(run, "scores_*.jsonl")):
+        if info["train_sources"] is None:
+            break
+        rows = pd.read_json(path, lines=True)
+        rows = rows[rows["label"].notna() & ~rows["source"].isin(info["train_sources"])]
+        for source, g in rows.groupby("source"):
+            y = g["label"].map(LABELS)
+            if y.nunique() < 2:
+                continue
+            scores = pd.json_normalize(g["scores"].tolist())
+            for probe in scores:
+                put(probe, source, roc_auc_score(y, scores[probe]))
+    return out
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("main", help="train_probes.py run whose probes score the mix (trained on everything)")
+    parser.add_argument("runs", nargs="+", help="train_probes.py runs whose probes may score the mix")
     parser.add_argument("--holdout", nargs="*", default=[], help="train_probes.py runs with held-out families")
     parser.add_argument("--bar", type=float, default=0.75)
     parser.add_argument("--cues", default="cues", help="Name of the cue activation directory scored by score.py")
     parser.add_argument("--mix", default="mix-main", help="Name of the mix activation directory scored by score.py")
     args = parser.parse_args()
+    holdouts = [h for h in args.holdout if os.path.exists(os.path.join(h, "report.csv"))]
 
-    cue_scores = os.path.join(args.main, f"scores_{args.cues}.jsonl")
-    if not os.path.exists(cue_scores):
-        parser.error(f"{cue_scores} not found: run score.py {args.main} <acts>/{args.cues}")
-    table = pd.DataFrame(cue_aurocs(cue_scores)).T
-    val = [f"val:{p}" for p in PLACEMENTS]
-    zt = [f"zt:{p}" for p in PLACEMENTS]
-    table["val_min"] = table[val].min(axis=1)
-    table["zt_min"] = table[zt].min(axis=1)
+    tables, owner = [], {}  # owner: row name -> (run, probe)
+    for run in args.runs:
+        cue_scores = os.path.join(run, f"scores_{args.cues}.jsonl")
+        if not os.path.exists(cue_scores):
+            parser.error(f"{cue_scores} not found: run score.py {run} <acts>/{args.cues}")
+        t = pd.DataFrame(cue_aurocs(cue_scores)).T
+        held = pd.DataFrame(heldout_by_source(run, holdouts)).T.add_prefix("held:")
+        t = t.join(held)
+        name = os.path.basename(os.path.normpath(run))
+        if len(args.runs) > 1:
+            t.index = [f"{name}/{p}" for p in t.index]
+        owner.update({i: (run, i.split("/")[-1]) for i in t.index})
+        tables.append(t)
+    table = pd.concat(tables)
+    table["val_min"] = table[[f"val:{p}" for p in PLACEMENTS]].min(axis=1)
+    table["zt_min"] = table[[f"zt:{p}" for p in PLACEMENTS]].min(axis=1)
     table["good"] = (table["val_min"] >= args.bar) & (table["zt_min"] >= args.bar)
-    for run in sorted(args.holdout):
-        if os.path.exists(os.path.join(run, "report.csv")):
-            table[os.path.basename(os.path.normpath(run))] = pd.Series(heldout_auroc(run))
-    table = table.dropna(axis=1, how="all")  # e.g. a deploy-only held-out source has no AUROC
-    hold = [c for c in table if c.startswith("hold")]
-    if hold:
-        table["hold_min"] = table[hold].min(axis=1)
+    held = sorted(c for c in table if c.startswith("held:"))
+    if held:
+        table["hold_min"] = table[held].min(axis=1)
+    cues = [f"{s}:{p}" for s in ("val", "zt") for p in PLACEMENTS]
+    table = table[cues + ["val_min", "zt_min", "good"] + held + (["hold_min"] if held else [])]
     table = table.sort_values(["good", "zt_min"], ascending=False)
 
-    out = os.path.join(args.main, "probe_report.csv")
+    out = os.path.join(args.runs[0], "probe_report.csv")
     table.to_csv(out)
     with pd.option_context("display.width", 300, "display.max_columns", None):
         print(table.round(3).to_string())
@@ -90,19 +143,26 @@ def main():
     print(f"\nGood (val and ZT AUROC >= {args.bar} in every placement; ZT is a subset of val): {good or 'none'}"
           f"\nSaved {out}")
 
-    mix_scores = os.path.join(args.main, f"scores_{args.mix}.jsonl")
-    if not os.path.exists(mix_scores):
-        print(f"No {mix_scores} yet: run score.py {args.main} <acts>/{args.mix} for the mix scores")
+    by_run = {}
+    for g in good:
+        run, probe = owner[g]
+        by_run.setdefault(run, []).append((g, probe))
+    missing = [os.path.join(r, f"scores_{args.mix}.jsonl") for r in by_run
+               if not os.path.exists(os.path.join(r, f"scores_{args.mix}.jsonl"))]
+    if not good or missing:
+        print(f"No {args.mix} scores written" + (f": run score.py for {missing}" if missing else ""))
         return
-    mix_out = os.path.join(args.main, f"{args.mix}_good.jsonl")
-    n = 0
-    with open(mix_scores) as f, open(mix_out, "w") as g:
-        for line in f:
-            r = json.loads(line)
-            g.write(json.dumps({"id": r["id"], "source": r["source"], "meta": r["meta"],
-                                "scores": {p: r["scores"][p] for p in good}}) + "\n")
-            n += 1
-    print(f"Saved {n} {args.mix} rows x {len(good)} good probes to {mix_out}")
+    merged = {}
+    for run, probes in by_run.items():
+        with open(os.path.join(run, f"scores_{args.mix}.jsonl")) as f:
+            for line in f:
+                r = json.loads(line)
+                row = merged.setdefault(r["id"], {"id": r["id"], "source": r["source"], "meta": r["meta"], "scores": {}})
+                row["scores"].update({g: r["scores"][p] for g, p in probes})
+    mix_out = os.path.join(args.runs[0], f"{args.mix}_good.jsonl")
+    with open(mix_out, "w") as f:
+        f.writelines(json.dumps(r) + "\n" for r in merged.values())
+    print(f"Saved {len(merged)} {args.mix} rows x {len(good)} good probes to {mix_out}")
 
 
 if __name__ == "__main__":

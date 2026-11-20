@@ -8,7 +8,13 @@ judged on three things:
 - the zero-tolerance (ZT) cues, a subset of the validation cues;
 - sources held out of training.
 
-Every probe kind is trained on the same data and scored and compared the same way:
+There are two probe runs. Every probe in them is scored and compared the same way:
+- **`all`**: trained on the main training set: Dolly, Needham, aware-bench and WildChat.
+- **`verbalized`**: trained only on mix-discovery rows labeled by whether Qwen voiced evaluation awareness in its
+  chain of thought. Its label is the model's own judgement, not where a prompt came from, so it is kept apart
+  rather than mixed in.
+
+Each run trains every probe kind on its own rows:
 - **meandiff**: the normalized mean-difference direction;
 - **linear**: logistic regression;
 - **mlp**: a small MLP;
@@ -28,15 +34,21 @@ report.py             ->  <run>/probe_report.csv               good = val and ZT
 ```bash
 # GPU, once per dataset (see RunPod)
 python extract.py --model qwen3.8-27b --data dolly data/needham_rows.jsonl data/awarebench_rows.jsonl \
-    data/wildchat_rows.jsonl data/verbalized_rows.jsonl --out output/qwen3.8-27b/acts/train
+    data/wildchat_rows.jsonl --out output/qwen3.8-27b/acts/train
+python extract.py --model qwen3.8-27b --data data/verbalized_rows.jsonl
 python extract.py --model qwen3.8-27b --data cues
 python extract.py --model qwen3.8-27b --data data/mix-main.jsonl
 
 # anywhere, no GPU
-bash scripts/train_all.sh output/qwen3.8-27b/acts/train          # trained/all + trained/hold-*
-python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/cues
-python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/mix-main
-python report.py output/qwen3.8-27b/trained/all --holdout output/qwen3.8-27b/trained/hold-*
+A=output/qwen3.8-27b/acts T=output/qwen3.8-27b/trained
+bash scripts/train_all.sh $A/train                                  # $T/all + $T/hold-*
+python train_probes.py $A/verbalized_rows --name verbalized         # $T/verbalized
+for run in all verbalized; do
+    python score.py $T/$run $A/cues; python score.py $T/$run $A/mix-main
+done
+python score.py $T/all $A/verbalized_rows                           # held-out: all on verbalized
+python score.py $T/verbalized $A/train                              # held-out: verbalized on everything else
+python report.py $T/all $T/verbalized --holdout $T/hold-*
 ```
 
 Quick local test on the 0.8B model (a few minutes on an M-series Mac):
@@ -50,14 +62,13 @@ python report.py output/qwen3.5-0.8b/trained/all --cues cues_2
 ```
 
 `train_probes.py` accepts several activation directories and concatenates their rows. You can therefore add a
-newly extracted training source without re-extracting the others, e.g.
-`bash scripts/train_all.sh acts/full acts/verbalized`.
+newly extracted training source to a run without re-extracting the others.
 
 ## Probes
 
 `src/classifiers.py`, all trained by `train_probes.py`:
 
-- **Training rows.** Every kind sees the same rows with the same weights.
+- **Training rows.** Within a run, every kind sees the same rows with the same weights.
 - **Layers.** One probe per stored layer: 6 layers, evenly spaced between 30% and 90% of depth.
 - **Probe names:**
   - `meandiff_L<l>`: unit direction mean(eval) − mean(deploy) of the raw activations, using weighted means. The
@@ -99,26 +110,23 @@ The system and prefix placements are averaged over 20 stems.
 
 `extract.py --data cues` stores their activations once. After that, any probe run is scored on them offline.
 
-**Held-out sources.** `scripts/train_all.sh` trains the probes once on everything (`all`, the probes that score
-the mix). It then retrains them once per held-out source. It does not hold out WildChat on its own, because it is
-deploy-only and has no AUROC there. The held-out runs are:
-- `hold-dolly`
-- `hold-needham`
-- `hold-awarebench`
-- `hold-chat`
-- `hold-agent`
-- `hold-verbalized`, when that source is present
+**Held-out sources.** Each probe gets one `held:<source>` column per training source: its AUROC on that source's
+rows when they were not used to train it.
+- **Sources the run trained on.** `scripts/train_all.sh` trains `all` on the whole training set, then retrains
+  the same recipe once per held-out group: `hold-dolly`, `hold-needham`, `hold-awarebench`, `hold-chat` and
+  `hold-agent`. WildChat is not held out on its own, because it is deploy-only and has no AUROC there. The value
+  comes from the hold-out runs that left the source out, taking the minimum if several did. The `all` probes are
+  trained on everything, so this is evidence about the recipe, not about the exact probe.
+- **Sources the run never saw.** The value is computed directly from the run's scores on those rows: `all` on
+  verbalized, and `verbalized` on everything else.
 
-The final probes are trained on everything, so the generalization evidence for a probe in `all` is the same
-probe recipe's AUROC on data it did not see in each held-out run.
-
-`report.py` writes one row per probe, containing:
+`report.py` takes several runs (rows `<run>/<probe>`) and writes one row per probe, containing:
 - the cue AUROCs per placement: eval- vs deploy-expected cues, for the validation set and for ZT;
 - `good`;
 - the held-out AUROCs, with their minimum.
 
 A probe is `good` when the validation and ZT AUROCs are ≥ `--bar` (0.75) in every placement. The held-out AUROCs
-are reported but not used to decide `good`. `report.py` writes `mix-main_good.jsonl` with these fields: `id`,
+are reported but not used to decide `good`. `report.py` writes `mix-main_good.jsonl`, merging every run's good probes, with these fields: `id`,
 `source` (the mix dataset), `meta` (from the mix) and `scores` (one logit per good probe).
 
 ## Data
@@ -129,7 +137,7 @@ are reported but not used to decide `good`. `report.py` writes `mix-main_good.js
 | Needham et al. chat + agentic | `scripts/prepare_needham.py` | gated, CC BY-NC-SA, contains GAIA: never in git |
 | aware-bench (EvalDetectBench) | `scripts/prepare_awarebench.py` | CC BY-NC-SA, contains GAIA: never in git |
 | WildChat (deploy only) | `scripts/prepare_wildchat.py` | ODC-BY |
-| mix-discovery, labeled by CoT voicing | `scripts/prepare_verbalized.py` | from `data/probe_sample_verbalized.csv` |
+| mix-discovery, labeled by CoT voicing (own run) | `scripts/prepare_verbalized.py` | from `data/probe_sample_verbalized.csv`; not in the main training set |
 | **mix-main** (score only) | built in jlens_evalaware | measurement set: never train on it |
 
 `data/` is gitignored.
@@ -219,7 +227,7 @@ src/classifiers.py         # probe kinds, ensembles, weights, metrics
 src/rows.py                # row format, Dolly paired rows, group split
 src/cues.py                # validation / ZT cues as rows
 scripts/prepare_*.py       # training sources -> rows
-scripts/train_all.sh       # all + hold-out runs
+scripts/train_all.sh       # all + hold-out runs (main training set)
 scripts/runpod_*.sh, scripts/download_artifacts.sh
 datasets/                  # Dolly stems, system prompts, validation and ZT cues
 ```

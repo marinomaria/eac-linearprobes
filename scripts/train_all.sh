@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Train the probe recipe on everything ("all", the probes that score the mix) and once per held-out source
-# (the generalization evidence report.py puts next to the cue AUROCs). No GPU needed.
+# Train the probe recipe on the main training set ("all", whose probes may score the mix) and once per held-out
+# source (the generalization evidence report.py puts next to the cue AUROCs). No GPU needed. The verbalized
+# mix-discovery rows are not part of it: they get their own run (README).
 #
 #   bash scripts/train_all.sh output/qwen3.8-27b/acts/train [more activation dirs...]
 #
@@ -22,6 +23,3 @@ run hold-needham --holdout-family 'needham:*'
 run hold-awarebench --holdout-family 'awarebench:*'
 run hold-chat --holdout-family 'needham:chat:*' 'awarebench:chat:*' 'wildchat:*'
 run hold-agent --holdout-family 'needham:agent:*' 'awarebench:agent:*'
-if grep -q '"family": "verbalized:' "${ACTS[@]/%//rows.jsonl}"; then
-    run hold-verbalized --holdout-family 'verbalized:*'
-fi

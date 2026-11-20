@@ -1,13 +1,14 @@
 #!/usr/bin/env python
 """
-Score activations stored by extract.py with probes trained by train_probes.py. Needed for the MLP probes;
-the logistic probes can also be used through export.pt with the existing scripts.
+Score activations stored by extract.py with every probe of a train_probes.py run (meandiff_L*, linear_L*, mlp_L*,
+linear_ensemble, mlp_ensemble). No model or GPU needed.
 
-Writes <trained dir>/scores_<acts name>.jsonl: one line per row with id, label, group, family, meta and
-"scores": {probe name: logit}. If the rows are labeled, prints AUROC / recall@1%FPR per probe.
+Writes <trained dir>/scores_<acts name>.jsonl: one line per row with id, label, group, family, source, meta and
+"scores": {probe: logit}. If the rows are labeled, prints AUROC / recall@1%FPR per probe.
 
 Usage:
-    python score.py output/qwen3.8-27b/trained/v1 output/qwen3.8-27b/acts/mix-main
+    python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/cues
+    python score.py output/qwen3.8-27b/trained/all output/qwen3.8-27b/acts/mix-main
 """
 import argparse
 import json

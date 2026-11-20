@@ -1,11 +1,15 @@
 """
-Learned probes on stored last-token activations, after the FIBS paper's LinearEnsemble / MLPEnsemble:
-one probe per layer trained with BCE (AdamW, lr 5e-3, batch 32), then an ensemble over the layers whose
-final train loss is below 0.6.
+Probes on stored last-token activations. Three kinds, one probe per stored layer each, all trained on the same
+rows and weights by train_probes.py and scored the same way (score_all):
+  - meandiff: unit direction mean(eval) - mean(deploy) of the raw activations (weighted means), as in
+    https://github.com/Jordine/evaluation-awareness-probing; the logit is the projection minus the midpoint's
+  - linear:   logistic regression on standardized features, BCE with AdamW (lr 5e-3, batch 32)
+  - mlp:      the same with one hidden layer of 256 units
+plus linear_ensemble / mlp_ensemble, the mean logit over the layers whose final train loss is below 0.6 (after
+the FIBS paper's LinearEnsemble / MLPEnsemble, Hollinsworth, Spies et al., arXiv 2610.12445).
 
-Choices not specified by the paper (adjust freely): features are standardized per layer with train-set
-mean/std; the ensemble averages logits; the MLP has one hidden layer of 256 units; cosine learning-rate
-decay over a fixed number of epochs.
+Choices not specified by the paper (adjust freely): per-layer standardization with train-set mean/std; logits
+averaged in the ensemble; cosine learning-rate decay over a fixed number of epochs.
 """
 import collections
 import math
@@ -34,11 +38,20 @@ class LayerProbe(nn.Module):
     def forward(self, x):
         return self.net((x - self.mean) / self.std).squeeze(-1)
 
-    def direction(self):
-        """For a linear probe: (w, c) such that logit = w . x + c on raw activations."""
-        assert self.hidden == 0
-        w = self.net.weight[0] / self.std
-        return w, self.net.bias[0] - (w * self.mean).sum()
+
+
+def mean_diff_probe(x, y, weights=None):
+    """x: float32 [n, d], y: float32 [n] in {0, 1}. A LayerProbe (identity standardization) whose logit is the
+    projection onto the unit mean-difference direction, 0 halfway between the two class means."""
+    w = torch.ones_like(y) if weights is None else weights
+    mu = [(x[y == c] * w[y == c, None]).sum(0) / w[y == c].sum() for c in (1, 0)]
+    u = mu[0] - mu[1]
+    u = u / u.norm().clamp_min(1e-8)
+    probe = LayerProbe(x.shape[1], torch.zeros(x.shape[1]), torch.ones(x.shape[1]))
+    with torch.no_grad():
+        probe.net.weight.copy_(u[None])
+        probe.net.bias.fill_(-(u @ (mu[0] + mu[1]) / 2).item())
+    return probe.eval()
 
 
 def train_layer_probe(x, y, hidden=0, epochs=None, lr=5e-3, batch_size=32, weight_decay=0.01, seed=0, device="cpu",
@@ -81,9 +94,10 @@ def load_trained(trained_dir):
     """probes.pt written by train_probes.py -> (saved dict, {kind: [LayerProbe per stored layer]})."""
     saved = torch.load(os.path.join(trained_dir, "probes.pt"))
     probes = {}
-    for kind, hidden in (("linear", 0), ("mlp", saved["mlp_hidden"])):
+    for kind, states in saved["state"].items():
+        hidden = saved["mlp_hidden"] if kind == "mlp" else 0
         probes[kind] = []
-        for state in saved["state"][kind]:
+        for state in states:
             probe = LayerProbe(state["mean"].shape[0], state["mean"], state["std"], hidden)
             probe.load_state_dict(state)
             probes[kind].append(probe.eval())
@@ -92,8 +106,8 @@ def load_trained(trained_dir):
 
 @torch.no_grad()
 def score_all(saved, probes, layer_x, device="cpu", chunk=4096):
-    """layer_x(layer) -> float32 [n, d]. Returns {probe name: logits [n]} for every per-layer probe and the
-    linear / mlp ensembles (mean logit over the kept layers), as reported by train_probes.py."""
+    """layer_x(layer) -> float32 [n, d]. Returns {probe name: logits [n]} for every per-layer probe
+    (<kind>_L<layer>) and the ensembles (<kind>_ensemble, mean logit over the kept layers)."""
     layers = saved["info"]["layers"]
     scores = {}
     for j, layer in enumerate(layers):

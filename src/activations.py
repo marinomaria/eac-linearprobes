@@ -21,12 +21,24 @@ import torch
 from tqdm import tqdm
 
 from src.model import format_chat
-from src.probe import token_budget_batches
 
 
 def default_layers(n_layers, n=6, lo=0.3, hi=0.9):
     """n layers evenly spaced between lo and hi fractions of depth (the paper's 30-90% band)."""
     return sorted({round(f * n_layers) for f in np.linspace(lo, hi, n)})
+
+
+def token_budget_batches(order, lengths, batch_size, max_batch_tokens):
+    """Split `order` (sorted by ascending length) into batches of at most `batch_size` items whose padded size
+    (items x longest) stays within `max_batch_tokens`. A prompt longer than the budget gets a batch of its own."""
+    batch = []
+    for i in order:
+        if batch and (len(batch) == batch_size or (len(batch) + 1) * lengths[i] > max_batch_tokens):
+            yield batch
+            batch = []
+        batch.append(i)
+    if batch:
+        yield batch
 
 
 class _Stop(Exception):
@@ -68,18 +80,6 @@ def _last_token(model, tokenizer, prompts, layers, blocks):
     return torch.stack([got[layer] for layer in layers], dim=1)
 
 
-def last_token_layers(model, tokenizer, formatted, layers, n_layers, batch_size=8, max_batch_tokens=16384):
-    """bf16 [n, len(layers), d_model]: last-token residual stream entering each block in layers, for each
-    already-formatted prompt (in input order)."""
-    blocks = _decoder_layers(model, n_layers)
-    lengths = [len(ids) for ids in tokenizer(formatted, add_special_tokens=False)["input_ids"]]
-    order = sorted(range(len(formatted)), key=lambda i: lengths[i])
-    out = torch.empty(len(formatted), len(layers), model.config.get_text_config().hidden_size, dtype=torch.bfloat16)
-    for idx in tqdm(list(token_budget_batches(order, lengths, batch_size, max_batch_tokens)), desc="Extracting"):
-        out[idx] = _last_token(model, tokenizer, [formatted[i] for i in idx], layers, blocks)
-    return out
-
-
 def extract(model, tokenizer, rows, layers, n_layers, out_dir, model_name, batch_size=8, max_batch_tokens=16384):
     if max(layers) >= n_layers:
         raise ValueError(f"layers must be < {n_layers} (residual stream entering a block)")
@@ -100,22 +100,29 @@ def extract(model, tokenizer, rows, layers, n_layers, out_dir, model_name, batch
     with open(os.path.join(out_dir, "rows.jsonl"), "w") as f:
         for r, n in zip(rows, lengths, strict=True):
             keys = ("id", "label", "group", "family", "meta")
-            f.write(json.dumps({**{k: r[k] for k in keys}, "source": r.get("source", r["family"].split(":")[0]),
-                                "n_tokens": n}) + "\n")
+            f.write(json.dumps({**{k: r[k] for k in keys}, "source": r["source"], "n_tokens": n}) + "\n")
     with open(os.path.join(out_dir, "info.json"), "w") as f:
         json.dump({"model": model_name, "layers": layers, "n_layers": n_layers, "d_model": d_model}, f, indent=2)
 
 
-def load(act_dir):
-    """Returns (acts memmap [n, k, d] uint16, rows, info). Use `layer_tensor` to read one layer as float32."""
-    with open(os.path.join(act_dir, "info.json")) as f:
-        info = json.load(f)
-    with open(os.path.join(act_dir, "rows.jsonl")) as f:
-        rows = [json.loads(line) for line in f]
-    return np.load(os.path.join(act_dir, "acts.npy"), mmap_mode="r"), rows, info
+def load(act_dirs):
+    """One directory or several with the same model and layers (rows concatenated, e.g. a training set extracted
+    in parts). Returns (acts, rows, info); acts is a list of memmaps [n_i, k, d] uint16, read with layer_tensor."""
+    act_dirs = [act_dirs] if isinstance(act_dirs, str) else list(act_dirs)
+    acts, rows, info = [], [], None
+    for d in act_dirs:
+        with open(os.path.join(d, "info.json")) as f:
+            this = json.load(f)
+        if info is not None and this != info:
+            raise ValueError(f"{d} ({this}) does not match {act_dirs[0]} ({info})")
+        info = this
+        with open(os.path.join(d, "rows.jsonl")) as f:
+            rows += [json.loads(line) for line in f]
+        acts.append(np.load(os.path.join(d, "acts.npy"), mmap_mode="r"))
+    return acts, rows, info
 
 
-def layer_tensor(acts, j, idx=None):
-    """float32 tensor [n, d] for the j-th stored layer (optionally only rows idx)."""
-    a = acts[:, j, :] if idx is None else acts[idx, j, :]
-    return torch.from_numpy(np.ascontiguousarray(a).view(np.int16)).view(torch.bfloat16).float()
+def layer_tensor(acts, j):
+    """float32 tensor [n, d] for the j-th stored layer, all rows."""
+    a = np.concatenate([np.ascontiguousarray(x[:, j, :]) for x in acts])
+    return torch.from_numpy(a.view(np.int16)).view(torch.bfloat16).float()

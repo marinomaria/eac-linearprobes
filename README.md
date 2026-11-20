@@ -129,6 +129,10 @@ A probe is `good` when the validation and ZT AUROCs are ≥ `--bar` (0.75) in ev
 are reported but not used to decide `good`. `report.py` writes `mix-main_good.jsonl`, merging every run's good probes, with these fields: `id`,
 `source` (the mix dataset), `meta` (from the mix) and `scores` (one logit per good probe).
 
+When no probe is good, two options pick the probes instead, writing the same format:
+- `--top N` takes the first N probes in report order (good, then `zt_min`) and writes `mix-main_top<N>.jsonl`;
+- `--probes all/linear_L42 verbalized/linear_L42 ...` takes the named probes and writes `mix-main_selected.jsonl`.
+
 ## Data
 
 | rows | script | license / note |

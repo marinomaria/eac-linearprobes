@@ -108,6 +108,21 @@ def main():
     parser.add_argument("--bar", type=float, default=0.75)
     parser.add_argument("--cues", default="cues", help="Name of the cue activation directory scored by score.py")
     parser.add_argument("--mix", default="mix-main", help="Name of the mix activation directory scored by score.py")
+    choice = parser.add_mutually_exclusive_group()
+    choice.add_argument(
+        "--probes",
+        nargs="+",
+        default=None,
+        help="Write the mix scores of these probes (names as in probe_report.csv, e.g. all/linear_L42) to "
+        "<mix>_selected.jsonl instead of the good ones",
+    )
+    choice.add_argument(
+        "--top",
+        type=int,
+        default=None,
+        help="Write the mix scores of the N best probes (report order: good, then zt_min) to <mix>_top<N>.jsonl "
+        "instead of the good ones",
+    )
     args = parser.parse_args()
     holdouts = [h for h in args.holdout if os.path.exists(os.path.join(h, "report.csv"))]
 
@@ -145,8 +160,17 @@ def main():
         f"\nSaved {out}"
     )
 
+    if args.probes:
+        unknown = [p for p in args.probes if p not in table.index]
+        if unknown:
+            parser.error(f"--probes not in the report: {unknown}")
+        chosen, kind = args.probes, "selected"
+    elif args.top:
+        chosen, kind = table.index[: args.top].tolist(), f"top{args.top}"
+    else:
+        chosen, kind = good, "good"
     by_run = {}
-    for g in good:
+    for g in chosen:
         run, probe = owner[g]
         by_run.setdefault(run, []).append((g, probe))
     missing = [
@@ -154,7 +178,7 @@ def main():
         for r in by_run
         if not os.path.exists(os.path.join(r, f"scores_{args.mix}.jsonl"))
     ]
-    if not good or missing:
+    if not chosen or missing:
         print(f"No {args.mix} scores written" + (f": run score.py for {missing}" if missing else ""))
         return
     merged = {}
@@ -166,10 +190,10 @@ def main():
                     r["id"], {"id": r["id"], "source": r["source"], "meta": r["meta"], "scores": {}}
                 )
                 row["scores"].update({g: r["scores"][p] for g, p in probes})
-    mix_out = os.path.join(args.runs[0], f"{args.mix}_good.jsonl")
+    mix_out = os.path.join(args.runs[0], f"{args.mix}_{kind}.jsonl")
     with open(mix_out, "w") as f:
         f.writelines(json.dumps(r) + "\n" for r in merged.values())
-    print(f"Saved {len(merged)} {args.mix} rows x {len(good)} good probes to {mix_out}")
+    print(f"Saved {len(merged)} {args.mix} rows x {len(chosen)} {kind} probes to {mix_out}: {chosen}")
 
 
 if __name__ == "__main__":
